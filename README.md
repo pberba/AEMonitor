@@ -1,6 +1,9 @@
 # AEMonitor
 
-Apple Events Monitor — stream and parse Apple Events from macOS debug unified logs (`com.apple.appleevents` subsystem).
+Apple Events Monitor — stream and parse Apple Events from macOS debug unified logs (`com.apple.appleevents` subsystem). This tool allows us to log activity by `osascript` that isn't captured by process creation telemetry.
+
+<img width="938" height="484" alt="macsync" src="https://github.com/user-attachments/assets/ac571757-3399-40f1-93ac-b32d701f8459" />
+
 
 ## Installation
 
