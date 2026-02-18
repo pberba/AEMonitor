@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aemonitor"
+version = "0.1.0"
+description = "AEMonitor project"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "applescript-decompiler @ git+https://github.com/pberba/applescript-decompiler.git@v1.0.1",
+]
+
+[project.scripts]
+aemonitor = "aemonitor.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[tool.uv]
+# uv uses standard pyproject.toml; uv sync / uv run work with the git dependency above
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["aemonitor*"]
