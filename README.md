@@ -4,6 +4,8 @@ Apple Events Monitor — stream and parse Apple Events from macOS debug unified 
 
 <img width="938" height="484" alt="macsync" src="https://github.com/user-attachments/assets/ac571757-3399-40f1-93ac-b32d701f8459" />
 
+Read More: [AEMonitor: Monitoring Apple Events for Malware Analysis and Detection](https://pberba.github.io/security/2026/02/21/aemonitor/)
+
 
 ## Installation
 
