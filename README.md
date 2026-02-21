@@ -20,6 +20,7 @@ uv run aemonitor stream
 python3 -m venv venv
 source venv/bin/activate
 pip install -e .
+# aemonitor stream
 ```
 
 ### Running tests
@@ -36,7 +37,7 @@ uv run pytest
 ### Stream Apple Events in real time
 
 ```bash
-uv run aemonitor stream
+aemonitor stream
 ```
 
 Run AppleScripts in another terminal to see events as they occur. Press Ctrl+C to stop.
@@ -44,8 +45,8 @@ Run AppleScripts in another terminal to see events as they occur. Press Ctrl+C t
 ### Parse from a log archive or NDJSON file
 
 ```bash
-uv run aemonitor parse path/to/file.logarchive
-uv run aemonitor parse path/to/file.ndjson
+aemonitor parse path/to/file.logarchive
+aemonitor parse path/to/file.ndjson
 ```
 
 ### Options
@@ -68,11 +69,11 @@ enrich_unified_log({
     "eventMessage": "sendToSelf(), event={syso,exec ...",
     "processImagePath": "/usr/bin/osascript"
 })
-# this adds an`appleEvent` field
+# this adds an `appleEvent` field
 ```
 
 ## Requirements
 
 - macOS (uses `/usr/bin/log` for streaming and parsing `logarchive` file)
-- Python 3.8+
+- Python 3.10+
 - To fully observe all events, you must [enable private data in Unified Logs](https://www.jamf.com/blog/unified-logs-how-to-enable-private-data/)

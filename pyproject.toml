@@ -4,12 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aemonitor"
-version = "0.1.0"
-description = "AEMonitor project"
+version = "0.1.1"
+description = "Apple Events Monitor — stream and parse Apple Events from macOS debug unified logs"
+authors = [{name = "pberba"}]
 readme = "README.md"
-requires-python = ">=3.8"
+license = {text = "GPL-3.0-only"}
+requires-python = ">=3.10"
 dependencies = [
-    "applescript-decompiler @ git+https://github.com/pberba/applescript-decompiler.git@v1.0.1",
+    "applescript-decompiler @ git+https://github.com/pberba/applescript-decompiler.git@v1.0.2",
 ]
 
 [project.scripts]
@@ -20,6 +22,10 @@ dev = ["pytest>=7"]
 
 [tool.uv]
 # uv uses standard pyproject.toml; uv sync / uv run work with the git dependency above
+
+[project.urls]
+Homepage = "https://github.com/pberba/AEMonitor"
+Repository = "https://github.com/pberba/AEMonitor"
 
 [tool.setuptools.packages.find]
 where = ["."]

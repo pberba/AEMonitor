@@ -25,17 +25,13 @@ _THREAD_ACTIVITY_WIDTH = 18  # [0x1234][0x12345678]
 _RETURN_ID_WIDTH = 8
 _PROCESS_WIDTH = 12
 
-from aemonitor.unified_logs import (
-    enrich_unified_log,
-    extract_apple_events,
-    extract_clone_src,
-)
+from aemonitor.unified_logs import enrich_unified_log
 
 # Base predicate for Apple Events subsystem logs with event=, reply=+returnID=, or cloneForCompatability
 BASE_PREDICATE = (
     '((subsystem == "com.apple.appleevents") AND '
-    '(eventMessage contains[c] "event=" OR '
-    '(eventMessage contains[c] "reply=" AND eventMessage contains[c] "returnID=") OR '
+    '(eventMessage contains[c] "event={" OR '
+    '(eventMessage contains[c] "reply={" AND eventMessage contains[c] "returnID=") OR '
     '(eventMessage contains[c] "cloneForCompatability(" AND (eventMessage contains[c] "src=\\""))))'
 )
 

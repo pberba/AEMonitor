@@ -1,5 +1,16 @@
 import logging
-from applescript_decompiler.ast import *
+from applescript_decompiler.ast import (
+    BinaryOp,
+    BinaryOpKind,
+    CommandCall,
+    Keyword,
+    ListLiteral,
+    NumberLiteral,
+    RecordField,
+    RecordLiteral,
+    StringLiteral,
+    VariableRef,
+)
 
 
 def get_command_name(event):
@@ -16,7 +27,7 @@ def get_target(event):
 
 
 def get_expression(expr):
-    # It's short, its probably a apple term'
+    # It's short, it's probably an Apple term
     if isinstance(expr, str):
         if len(expr) > 8:
             return StringLiteral(expr)
@@ -41,7 +52,6 @@ def get_expression(expr):
                 left=indexed,
                 right=get_expression(expr["from"]),
             )
-            ret.right = get_expression(expr["from"])
         return indexed
     if "__type__" in expr and expr["__type__"] == "utxt":
         # raw is <length>/$<first 32 bytes>...
@@ -62,7 +72,9 @@ def get_expression(expr):
         _hex_bytes = bytes.fromhex(_hex.strip("."))
         _reversed = _hex_bytes[::-1].decode("ascii")
         return StringLiteral(_reversed)
-
+    if "__type__" in expr and (expr["__type__"] == "fals" or expr["__type__"] == "true"):
+        return Keyword(expr["__type__"])
+    
     if "__type__" in expr:
         logging.warning(f"NOT IMPLEMENTED: {expr}")
         return StringLiteral(f"{expr['__type__']}({expr['__raw__']})")
@@ -85,6 +97,9 @@ def get_arguments(event):
         if not isinstance(v, dict) and not isinstance(v, list):
             ret.append(Keyword(k))
             ret.append(get_expression(str(v)))
+        elif k == "data":
+            ret.append(Keyword(k))
+            ret.append(get_expression(v))
         # fals and true are special cases since they change the
         # way that the params are presented
         elif "__type__" in v and v["__type__"] == "fals":

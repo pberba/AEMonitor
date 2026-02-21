@@ -1,7 +1,7 @@
 import re
 import os
 
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional
 
 from aemonitor.aedebug import parse_apple_event_debug, decode_utxt_raw
 from aemonitor.ast import derive_ast

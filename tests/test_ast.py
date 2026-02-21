@@ -95,6 +95,23 @@ class TestDeriveAst:
         assert "System" in result or "Preferenc" in result
         assert "Required" in result or "Applic" in result
 
+    def test_core_setd_terminal_set_visible_false(self):
+        """core/setd: Terminal target setting visible of front window to false."""
+        s = "{core,setd target='psn '[Terminal] {data=fals(0/$),----={form=prop,want=prop,seld=pvis,from={form=indx,want=cwin,seld=1,from=NULL-impl}}} attr:{csig=65536} returnID=-15080}"
+        result = _parse_and_derive(s)
+        assert "Terminal" in result
+        assert "visible" in result
+        assert "windows 1" in result
+        assert "false" in result
+
+    def test_core_dosc_terminal_do_script(self):
+        """core/dosc: Terminal target running do script with touch command."""
+        s = "{core,dosc target='psn '[Terminal] {----=utxt(38/$74006f0075006300680020002f0074006d0070002f0074006500730074002e00...)} attr:{subj=NULL-impl,csig=65536} returnID=11442}"
+        result = _parse_and_derive(s)
+        assert "Terminal" in result
+        assert "do script" in result
+        assert "touch /tmp/test." in result
+
     def test_aevt_oapp_port_target_no_tell_application_none(self):
         """aevt/oapp: port target uses UNKNOWN, must not produce 'tell application \"NONE\"'."""
         s = "{aevt,oapp target=port(4/$6b610000) {prdt={disp=1},aapd=TRUE} attr:{optk=[keyw(4/$74647270)],tokn=[sess=100003 pid=368 uid:501,501,501 g:20,20 pV:880]} returnID=-6515}"
