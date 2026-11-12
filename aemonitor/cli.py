@@ -25,6 +25,11 @@ _THREAD_ACTIVITY_WIDTH = 18  # [0x1234][0x12345678]
 _RETURN_ID_WIDTH = 8
 _PROCESS_WIDTH = 12
 
+from aemonitor.native_stream import (
+    NativeDependenciesMissing,
+    NativeStreamUnavailable,
+    iter_live_entries,
+)
 from aemonitor.unified_logs import enrich_unified_log
 
 # Base predicate for Apple Events subsystem logs with event=, reply=+returnID=, or cloneForCompatability
@@ -353,6 +358,7 @@ def _stream_or_parse(
     predicate_extra: Optional[str] = None,
     output_format: str,
     use_color: bool = True,
+    backend: str = "auto",
 ) -> int:
     proc: Optional[subprocess.Popen] = None
     if archive_path and archive_path.endswith(".ndjson"):
@@ -364,12 +370,28 @@ def _stream_or_parse(
             proc = _run_log_show(archive_path, predicate)
             entries = _iter_ndjson_lines(proc)
         else:
-            proc = _run_log_stream(predicate)
+            entries = None
+            if backend in ("auto", "native"):
+                # In-process LoggingSupport stream: predicate never appears on a command line
+                try:
+                    entries = iter_live_entries(predicate)
+                except NativeStreamUnavailable as e:
+                    if backend == "native":
+                        print(f"aemonitor: {e}", file=sys.stderr)
+                        return 1
+                    # auto: fall back to `log stream`; only warn if the native extra is installed
+                    if not isinstance(e, NativeDependenciesMissing):
+                        print(
+                            f"aemonitor: native backend unavailable ({e}), falling back to log stream",
+                            file=sys.stderr,
+                        )
+            if entries is None:
+                proc = _run_log_stream(predicate)
+                entries = _iter_ndjson_lines(proc)
             print(
                 "Streaming Apple Events... (run AppleScripts to see output, Ctrl+C to stop)",
                 file=sys.stderr,
             )
-            entries = _iter_ndjson_lines(proc)
 
     exit_code: Optional[int] = None  # None = normal completion
     try:
@@ -386,6 +408,8 @@ def _stream_or_parse(
     except KeyboardInterrupt:
         exit_code = 130  # 128 + SIGINT(2)
     finally:
+        # Closing the generator stops a native stream
+        entries.close()
         if proc is not None:
             if exit_code is not None:
                 proc.terminate()
@@ -417,6 +441,14 @@ def main() -> int:
         metavar="PREDICATE",
         default=None,
         help="Optional extra NSPredicate to AND with the base Apple Events filter",
+    )
+    stream_parser.add_argument(
+        "--backend",
+        choices=["auto", "log", "native"],
+        default="auto",
+        help="auto (default): native if PyObjC is installed, otherwise log. "
+        "log: run /usr/bin/log stream (predicate visible in ps). "
+        "native: stream in-process via LoggingSupport (requires PyObjC)",
     )
     stream_parser.add_argument(
         "--no-color",
@@ -462,6 +494,7 @@ def main() -> int:
                 predicate_extra=args.predicate,
                 output_format=args.style,
                 use_color=use_color,
+                backend=args.backend,
             )
         if args.command == "parse":
             input_path = args.input

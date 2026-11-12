@@ -6,6 +6,7 @@ import tempfile
 
 import pytest
 
+from aemonitor import cli
 from aemonitor.cli import (
     _build_predicate,
     _format_decompiled_message,
@@ -14,6 +15,7 @@ from aemonitor.cli import (
     _process_and_output,
     BASE_PREDICATE,
 )
+from aemonitor.native_stream import NativeDependenciesMissing, NativeStreamUnavailable
 
 
 class TestBuildPredicate:
@@ -193,3 +195,49 @@ class TestIterNdjsonFromFile:
             assert entries[1]["eventMessage"] == "bar"
         finally:
             os.unlink(path)
+
+
+class TestStreamBackendSelection:
+    """`stream --backend auto` uses native when available, otherwise falls back to `log stream`."""
+
+    class LogStreamCalled(Exception):
+        pass
+
+    @pytest.fixture
+    def log_stream(self, monkeypatch):
+        def fake_run_log_stream(predicate):
+            raise self.LogStreamCalled()
+
+        monkeypatch.setattr(cli, "_run_log_stream", fake_run_log_stream)
+
+    def _unavailable(self, monkeypatch, exc):
+        def fake_iter_live_entries(predicate):
+            raise exc
+
+        monkeypatch.setattr(cli, "iter_live_entries", fake_iter_live_entries)
+
+    def test_auto_uses_native_when_available(self, monkeypatch, log_stream):
+        monkeypatch.setattr(cli, "iter_live_entries", lambda predicate: (e for e in []))
+        assert cli._stream_or_parse(output_format="ndjson", backend="auto") == 0
+
+    def test_auto_falls_back_silently_without_pyobjc(self, monkeypatch, log_stream, capsys):
+        self._unavailable(monkeypatch, NativeDependenciesMissing("no pyobjc"))
+        with pytest.raises(self.LogStreamCalled):
+            cli._stream_or_parse(output_format="ndjson", backend="auto")
+        assert "falling back" not in capsys.readouterr().err
+
+    def test_auto_warns_when_native_installed_but_broken(self, monkeypatch, log_stream, capsys):
+        self._unavailable(monkeypatch, NativeStreamUnavailable("OSLogEventLiveStream not found"))
+        with pytest.raises(self.LogStreamCalled):
+            cli._stream_or_parse(output_format="ndjson", backend="auto")
+        assert "falling back to log stream" in capsys.readouterr().err
+
+    def test_native_errors_instead_of_falling_back(self, monkeypatch, log_stream, capsys):
+        self._unavailable(monkeypatch, NativeDependenciesMissing("requires PyObjC"))
+        assert cli._stream_or_parse(output_format="ndjson", backend="native") == 1
+        assert "requires PyObjC" in capsys.readouterr().err
+
+    def test_log_skips_native(self, monkeypatch, log_stream):
+        monkeypatch.setattr(cli, "iter_live_entries", lambda predicate: pytest.fail("native used"))
+        with pytest.raises(self.LogStreamCalled):
+            cli._stream_or_parse(output_format="ndjson", backend="log")
