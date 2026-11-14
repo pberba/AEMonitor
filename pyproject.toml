@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aemonitor"
-version = "0.1.1"
+version = "0.2.0"
 description = "Apple Events Monitor — stream and parse Apple Events from macOS debug unified logs"
 authors = [{name = "pberba"}]
 readme = "README.md"
