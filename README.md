@@ -44,6 +44,19 @@ aemonitor stream
 
 Run AppleScripts in another terminal to see events as they occur. Press Ctrl+C to stop.
 
+### Stream using the native macOS API
+
+Following the [logStream example](https://github.com/objective-see/TAOMM/tree/main/Code/Vol%20II/CH%206/logStream) from Objective-See's TAOMM, you can opt to get the log stream directly from macOS. One benefit of this is that the filters aren't readable with `ps`, as they are when using `log stream --predicate ...`.
+
+Install the `native` extra and `stream` uses it automatically:
+
+```bash
+uv sync --extra native
+uv run aemonitor stream
+```
+
+If the native stream can't start, `stream` prints a warning and falls back to `/usr/bin/log`. Use `--backend native` to fail instead, or `--backend log` to always use `/usr/bin/log`.
+
 ### Parse from a log archive or NDJSON file
 
 ```bash
@@ -58,6 +71,7 @@ aemonitor parse path/to/file.ndjson
 | `--style syslog` | Human-readable output with decompiled AppleScript (default) |
 | `--style ndjson` | Raw enriched JSON output |
 | `--predicate PREDICATE` | Extra NSPredicate to filter logs |
+| `--backend auto\|native\|log` | (`stream` only) `auto` (default) streams in-process via LoggingSupport when the `native` extra is installed, otherwise uses `/usr/bin/log` |
 | `--no-color` | Disable colored output (useful when piping) |
 
 ### Using as a module

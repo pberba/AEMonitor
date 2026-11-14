@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aemonitor"
-version = "0.1.1"
+version = "0.2.0"
 description = "Apple Events Monitor — stream and parse Apple Events from macOS debug unified logs"
 authors = [{name = "pberba"}]
 readme = "README.md"
@@ -19,6 +19,7 @@ aemonitor = "aemonitor.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
+native = ["pyobjc-core>=10", "pyobjc-framework-Cocoa>=10"]
 
 [tool.uv]
 # uv uses standard pyproject.toml; uv sync / uv run work with the git dependency above
