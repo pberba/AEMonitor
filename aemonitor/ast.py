@@ -1,4 +1,5 @@
 import logging
+import re
 from applescript_decompiler.ast import (
     BinaryOp,
     BinaryOpKind,
@@ -113,9 +114,45 @@ def get_arguments(event):
     return ret
 
 
-def derive_ast(event):
-    return CommandCall(
+# aevt/ansr is the standard Apple Event "answer" (a reply), not a command. The
+# decompiler has no terminology for it, so rendering it as a command produced a
+# bogus "aevtansr ..." statement (e.g. tell application "X" aevtansr {...}); for a
+# reply we want just the answer value instead.
+ANSWER_EVENT = ("aevt", "ansr")
+
+
+def _derive_answer_value(event):
+    params = event.get("params") or {}
+    if "----" in params:
+        node = get_expression(params["----"])
+    else:
+        fields = [
+            RecordField(label=Keyword(k), value=get_expression(v))
+            for k, v in params.items()
+            if "---" not in k
+        ]
+        if not fields:
+            return ""
+        node = RecordLiteral(fields=fields)
+    source = node.to_source()
+    # CommandCall.to_source wraps in parens; a bare expression usually doesn't, but
+    # strip a matching outer pair (e.g. a parenthesized object spec) if present.
+    if source.startswith("(") and source.endswith(")"):
+        source = source[1:-1]
+    return source
+
+
+def derive_ast(event, omit_target=False):
+    if (event.get("event_class"), event.get("event_id")) == ANSWER_EVENT:
+        return _derive_answer_value(event)
+    source = CommandCall(
         target=get_target(event),
         command_name=get_command_name(event),
         arguments=get_arguments(event),
     ).to_source()[1:-1]
+    if omit_target:
+        # The target is kept so the decompiler can resolve the app's terminology
+        # (command codes like coredosc -> "do script" via SDEFS[target]); drop the now
+        # redundant "tell application X" prefix it produced.
+        source = re.sub(r'^tell application "[^"]*" ', "", source, count=1)
+    return source

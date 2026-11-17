@@ -57,6 +57,18 @@ uv run aemonitor stream
 
 If the native stream can't start, `stream` prints a warning and falls back to `/usr/bin/log`. Use `--backend native` to fail instead, or `--backend log` to always use `/usr/bin/log`.
 
+### macOS app
+
+A native window (AppKit via PyObjC) with a live event table, request/reply pairing, sidebar filters for indicators, processes, targets and event codes, muting (right-click), a detail pane, and Start/Stop. It can also open a `.logarchive` or `.ndjson` file (⌘O) and export the events shown (⌘S).
+
+Build a self-contained `dist/AEMonitor.app` (Python, the AppleScript decompiler and PyObjC included):
+
+```bash
+uv run --group app pyinstaller --noconfirm aemonitor/app/AEMonitor.spec
+```
+
+Or run it from source with `uv run --extra native python -m aemonitor.app`. The app is ad-hoc signed and meant for the machine that built it; set `AEMONITOR_CODESIGN_IDENTITY` to sign with a Developer ID. Warnings go to `~/Library/Logs/AEMonitor.log`.
+
 ### Parse from a log archive or NDJSON file
 
 ```bash

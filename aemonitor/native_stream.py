@@ -10,8 +10,9 @@ Based on the OSLogEventLiveStream approach from objective-see's TAOMM logStream 
 
 import queue
 import sys
+import threading
 from datetime import datetime
-from typing import Any, Dict, Iterator
+from typing import Any, Dict, Iterator, Optional
 
 LOGGING_SUPPORT = "/System/Library/PrivateFrameworks/LoggingSupport.framework"
 
@@ -96,21 +97,25 @@ def proxy_to_entry(proxy: Any) -> Dict[str, Any]:
     }
 
 
-def iter_live_entries(predicate: str) -> Iterator[Dict[str, Any]]:
+def iter_live_entries(
+    predicate: str, stop: Optional[threading.Event] = None
+) -> Iterator[Dict[str, Any]]:
     """
     Yield live unified log entries matching `predicate` (debug level and above).
 
     Events are delivered on a LoggingSupport dispatch queue and handed to the
     caller's thread through a queue, so no run loop is needed. Closing the
-    generator invalidates the stream.
+    generator, or setting `stop` from another thread, invalidates the stream.
 
     Raises NativeStreamUnavailable immediately (not on first iteration) if
     PyObjC or LoggingSupport can't be loaded.
     """
-    return _iter_live_entries(_load_live_stream_class(), predicate)
+    return _iter_live_entries(_load_live_stream_class(), predicate, stop)
 
 
-def _iter_live_entries(live_stream: Any, predicate: str) -> Iterator[Dict[str, Any]]:
+def _iter_live_entries(
+    live_stream: Any, predicate: str, stop: Optional[threading.Event] = None
+) -> Iterator[Dict[str, Any]]:
     from Foundation import NSPredicate
 
     events: "queue.Queue[Any]" = queue.Queue()
@@ -140,6 +145,8 @@ def _iter_live_entries(live_stream: Any, predicate: str) -> Iterator[Dict[str, A
                 # Short timeout keeps Ctrl+C responsive
                 item = events.get(timeout=0.5)
             except queue.Empty:
+                if stop is not None and stop.is_set():
+                    return
                 continue
             if item is _STOP:
                 return

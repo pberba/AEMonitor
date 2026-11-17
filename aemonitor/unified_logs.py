@@ -111,26 +111,36 @@ def enrich_unified_log(unified_log: Dict[str, Any]) -> Dict[str, Any]:
         if parsed.get("event_class") is None:
             return None
 
+        # The target is kept accurate on the enriched event, but "tell application X"
+        # is dropped from the rendered AppleScript when it would be redundant (the
+        # target is the process itself).
+        process_image_path = unified_log.get("processImagePath", "")
+        curr_process = os.path.basename(process_image_path)
+        omit_target = False
         if key == "event" and "reply" in raw_apple_event:
-            # if this is a reply, then the original target is the process image path
-            process_image_path = unified_log.get("processImagePath", "")
-            parsed["target"] = os.path.basename(process_image_path)
+            # Receiver side (event+reply logged together): the process handled an
+            # event addressed to itself, so the target is this process.
+            parsed["target"] = curr_process
+            omit_target = True
         elif key == "event" and "target" in parsed:
-            # If the target is the same as the process image path, remove the target
-            process_image_path = unified_log.get("processImagePath", "")
-            curr_process = os.path.basename(process_image_path)
             if curr_process == parsed["target"]:
-                parsed["target"] = None
+                omit_target = True
         elif "Self" in raw_message:
-            # When sending to self, it's redundant to include the target in the AppleScript
-            parsed["target"] = None
+            # Sent to self: the target is this process.
+            parsed["target"] = curr_process
+            omit_target = True
 
-        # derive_ast expects params to be a dict; handle None from parse
+        # derive_ast expects params to be a dict; handle None from parse. The real
+        # target is kept so the decompiler can resolve the app's terminology
+        # (SDEFS[target]); derive_ast then drops the redundant "tell application X".
         event_for_ast = {**parsed, "params": parsed.get("params") or {}}
-        applescript = derive_ast(event_for_ast)
+        applescript = derive_ast(event_for_ast, omit_target=omit_target)
         unified_log["appleEvent"][key] = {
             "raw": payload,
             "return_id": parsed.get("return_id"),
+            "event_class": parsed.get("event_class"),
+            "event_id": parsed.get("event_id"),
+            "target": parsed.get("target"),
             "applescript": applescript,
         }
 

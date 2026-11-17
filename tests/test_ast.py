@@ -17,7 +17,8 @@ class TestDeriveAst:
         """aevt/ansr: osascript target with utxt direct object (Macintosh HD path)."""
         s = "{aevt,ansr target=osascript {----=utxt(66/$4d006100630069006e0074006f00730068002000480044003a00550073006500...)} returnID=16929}"
         result = _parse_and_derive(s)
-        assert "aevtansr" in result
+        # aevt/ansr is a reply: render the answer value, not a bogus "aevtansr" command
+        assert "aevtansr" not in result
         assert "Macintosh HD:Use" in result
 
     def test_ears_ffdr_finder_dlib(self):
@@ -33,7 +34,7 @@ class TestDeriveAst:
         """aevt/ansr: osascript target with errn error code."""
         s = "{aevt,ansr target=osascript {errn=-1708} returnID=-7695}"
         result = _parse_and_derive(s)
-        assert "aevtansr" in result
+        assert "aevtansr" not in result
         assert "-1708" in result
 
     def test_syso_exec_osascript_utxt(self):
@@ -57,7 +58,7 @@ class TestDeriveAst:
         """utxt with truncated hex (odd bytes, e.g. utxt(6/$74006d0000)) decodes with replacement char instead of crashing."""
         s = "{aevt,ansr target=osascript {----={want=docf,from={want=cfol,from={want=cfol,from={want=cfol,from={want=cobj,from={want=prop,from=NULL-impl,form=prop,seld=sdsk},form=name,seld=utxt(14/$7000720069007600610074006500)},form=name,seld=utxt(6/$74006d0000)},form=name,seld=utxt(22/$730079006e0063003100300031003600360036003400)},form=name,seld=utxt(10/$4e006f00740065007300)},form=name,seld=utxt(40/$4e006f0074006500530074006f00720065002e00730071006c00690074006500...)},errn=0} returnID=-3183}"
         result = _parse_and_derive(s)
-        assert "aevtansr" in result
+        assert "aevtansr" not in result
         assert "NoteStore.sqlite" in result
         assert (
             "tm" in result
