@@ -22,9 +22,24 @@ from aemonitor.cli import (
     _run_log_stream,
 )
 from aemonitor.native_stream import NativeStreamUnavailable, iter_live_entries
-from aemonitor.unified_logs import enrich_unified_log
+from aemonitor.unified_logs import (
+    PRIVACY_DEFAULT,
+    PRIVACY_PRIVATE,
+    PRIVACY_PUBLIC,
+    enrich_unified_log,
+    payload_privacy,
+)
 
 FACETS = ("indicator", "process", "target", "code")
+
+# Logging configurations the view can simulate, and the payload privacy classes
+# (see payload_privacy) each one reveals. None means no formatString to judge
+# from (files from elsewhere, tests); such records are always shown.
+PRIVACY_MODES = {
+    "private": {None, PRIVACY_PUBLIC, PRIVACY_DEFAULT, PRIVACY_PRIVATE},  # Enable-Private-Data
+    "default": {None, PRIVACY_PUBLIC},  # stock macOS
+    "public": {None, PRIVACY_PUBLIC, PRIVACY_DEFAULT},  # Default-Privacy-Setting: Public
+}
 _SEVERITY_RANK = {"high": 3, "medium": 2, "low": 1, "": 0}
 _ERRN = re.compile(r"errn=(-?\d+)")
 # "Reply of SendToSelf ( err == -1708)": the send itself failed, often with an empty reply
@@ -184,9 +199,10 @@ class Row:
         return part.get("return_id")
 
     @property
-    def private_only(self) -> bool:
-        """Every record behind this row would be redacted to <private> on stock macOS."""
-        return all(r.get("private_only") for r in self.records())
+    def privacy(self) -> Optional[str]:
+        """Logging privacy of the record carrying this row's content (the request,
+        or the lone reply/clone); see payload_privacy."""
+        return self.base.get("privacy")
 
     @property
     def correlation(self) -> Optional[Tuple[Any, Any]]:
@@ -262,6 +278,7 @@ class RecordPreparer:
             return None
         if record is None:
             return None
+        record["privacy"] = payload_privacy(record.get("formatString") or "")
         # Same as the ndjson output: drop parts that failed to parse
         ae = record["appleEvent"] = {k: v for k, v in record["appleEvent"].items() if v is not None}
         if not ae:
@@ -383,7 +400,7 @@ class RowFilter:
     query: str = ""
     only_flagged: bool = False
     show_clones: bool = True
-    hide_private: bool = False
+    privacy_mode: str = "private"  # key of PRIVACY_MODES
     include: Dict[str, Set[str]] = field(default_factory=lambda: {f: set() for f in FACETS})
     muted: Set[Tuple[str, str]] = field(default_factory=set)
 
@@ -404,7 +421,7 @@ class RowFilter:
     def matches(self, row: Row) -> bool:
         if not self.show_clones and row.kind == "clone":
             return False
-        if self.hide_private and row.private_only:
+        if row.privacy not in PRIVACY_MODES[self.privacy_mode]:
             return False
         if self.only_flagged and not row.flags:
             return False

@@ -6,7 +6,7 @@ from aemonitor.unified_logs import (
     extract_apple_events,
     extract_clone_src,
     enrich_unified_log,
-    is_private_only,
+    payload_privacy,
 )
 
 
@@ -74,34 +74,6 @@ class TestExtractCloneSrc:
         assert extract_clone_src("cloneForCompatability(src=msng dst=0x0") is None
 
 
-class TestIsPrivateOnly:
-    """A record is 'private-only' when all its content comes from %{private} fields."""
-
-    def test_clone_format_string_is_private_only(self):
-        # Clones are always src=%{private}s: redacted to nothing on stock macOS.
-        assert is_private_only("%{public}scloneForCompatability(src=%{private}s dst=%p")
-
-    def test_public_apple_event_is_not_private_only(self):
-        # event=%s / reply=%s are public, so Apple Events survive on stock macOS.
-        assert not is_private_only("%{public}sfinishAndSendReply: %d event=%s reply=%s")
-
-    def test_partially_private_is_not_private_only(self):
-        # Has public content alongside the private field -> still partly visible.
-        assert not is_private_only("Resource lookup at %{private}@\n\tRequest: %{public}@")
-
-    def test_empty_format_string(self):
-        assert not is_private_only("")
-
-    def test_enrich_sets_private_only_flag(self):
-        clone = enrich_unified_log(
-            {
-                "eventMessage": "cloneForCompatability(src=utxt(22/$2f0074006d007000) dst=0x0",
-                "formatString": "%{public}scloneForCompatability(src=%{private}s dst=%p",
-                "processImagePath": "/usr/bin/osascript",
-            }
-        )
-        assert clone["private_only"] is True
-
     def test_decode_utxt_raw_full_hex(self):
         """decode_utxt_raw decodes full UTF-16LE hex."""
         inner = "84/$540068006500200063006f006d006d0061006e00640020006500780069007400"
@@ -113,6 +85,46 @@ class TestIsPrivateOnly:
             "84/$540068006500200063006f006d006d0061006e00640020006500780069007400..."
         )
         assert decode_utxt_raw(inner) == "The command exit"
+
+
+class TestPayloadPrivacy:
+    """Format strings are the real ones from com.apple.appleevents."""
+
+    def test_public_payloads(self):
+        assert payload_privacy(
+            "%{public}ssendToSelf(), event=%{public}s reply=0x%{public}s sendMode=%x timeout=%ld"
+        ) == "public"
+        assert payload_privacy(
+            "%{public}sAE2000: (%d) Reply of SendToSelf ( err == %d) reply=%{public}s"
+        ) == "public"
+
+    def test_unmarked_string_is_private_by_default(self):
+        # No %{private} anywhere, yet redacted on stock macOS: a bare %s defaults to private.
+        assert payload_privacy(
+            "%{public}s%{public}s(port=%{public}s msgID=%d timeout %d event=%s"
+        ) == "default"
+        assert payload_privacy("%{public}sfinishAndSendReply: %d event=%s reply=%s") == "default"
+
+    def test_explicit_private(self):
+        assert payload_privacy("%{public}scloneForCompatability(src=%{private}s dst=%p") == "private"
+
+    def test_without_a_payload_prefix_every_string_counts(self):
+        assert payload_privacy("Resource lookup at %{private}@\n\tRequest: %{public}@") == "private"
+        assert payload_privacy("count=%d ptr=%p") == "public"
+
+    def test_no_format_string(self):
+        assert payload_privacy("") is None
+
+    def test_enrich_output_is_unchanged(self):
+        # Privacy is an app-side annotation; the CLI's enriched records don't carry it.
+        record = enrich_unified_log(
+            {
+                "eventMessage": "cloneForCompatability(src=utxt(22/$2f0074006d007000) dst=0x0",
+                "formatString": "%{public}scloneForCompatability(src=%{private}s dst=%p",
+                "processImagePath": "/usr/bin/osascript",
+            }
+        )
+        assert "privacy" not in record and "private_only" not in record
 
 
 class TestExtractAppleEvents:

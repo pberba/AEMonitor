@@ -175,31 +175,52 @@ def extract_clone_src(message: str) -> Optional[str]:
     return None
 
 
-def is_private_only(format_string: str) -> bool:
-    """True when a record's content comes entirely from ``%{private}`` fields.
+PRIVACY_PUBLIC = "public"  # %{public}: visible on any Mac
+PRIVACY_DEFAULT = "default"  # unmarked %s/%@: private by default
+PRIVACY_PRIVATE = "private"  # %{private}/%{sensitive}
+_PRIVACY_RANK = {PRIVACY_PUBLIC: 0, PRIVACY_DEFAULT: 1, PRIVACY_PRIVATE: 2}
 
-    Such a record would be redacted to ``<private>`` on a stock macOS (where
-    private-data logging is off), carrying no analyst value. Pointers (``%p``) and
-    a leading ``%{public}s`` (the sender-image prefix, empty for these AE logs)
-    are not treated as content.
+# Literal text right before the specifier that carries an Apple Event or clone payload.
+_PAYLOAD_PREFIXES = ("event=", "reply=", "src=")
+
+
+def payload_privacy(format_string: str) -> Optional[str]:
+    """How unified logging redacts a record's payload, judged from its formatString.
+
+    Dynamic strings (``%s``, ``%@``) are private unless marked ``%{public}``, so:
+
+    - ``"public"``:  the payload is ``%{public}``, visible on any Mac.
+    - ``"default"``: the payload is an unmarked ``%s``/``%@``, visible only with
+      ``Enable-Private-Data`` or ``Default-Privacy-Setting: Public``.
+    - ``"private"``: the payload is ``%{private}``/``%{sensitive}``, visible only
+      with ``Enable-Private-Data``.
+
+    Scalars and pointers are always public and are ignored. When no specifier is
+    introduced by ``event=``/``reply=``/``src=``, every dynamic string counts.
+    Returns None when there is no formatString to judge from.
     """
     if not format_string:
-        return False
-    saw_private = False
-    saw_public_content = False
-    for idx, m in enumerate(_SPEC_RE.finditer(format_string)):
+        return None
+    payload: List[str] = []
+    other: List[str] = []
+    prev_end = 0
+    for m in _SPEC_RE.finditer(format_string):
+        literal = format_string[prev_end : m.start()]
+        prev_end = m.end()
         ann, conv = m.group(1) or "", m.group(2)
-        if conv == "%":
+        if conv not in ("s", "@", "S"):
             continue
         if "private" in ann or "sensitive" in ann:
-            saw_private = True
-        elif conv == "p":
-            continue  # raw pointer, no content
-        elif conv == "s" and "public" in ann and idx == 0:
-            continue  # leading %{public}s sender-image prefix (empty in AE logs)
+            cls = PRIVACY_PRIVATE
+        elif "public" in ann:
+            cls = PRIVACY_PUBLIC
         else:
-            saw_public_content = True
-    return saw_private and not saw_public_content
+            cls = PRIVACY_DEFAULT
+        (payload if literal.endswith(_PAYLOAD_PREFIXES) else other).append(cls)
+    classes = payload or other
+    # A record is only as visible as its most restricted payload: one redacted
+    # field makes the whole Apple Event unparseable.
+    return max(classes, key=_PRIVACY_RANK.__getitem__) if classes else PRIVACY_PUBLIC
 
 
 def extract_apple_events(message: str) -> Dict[str, str]:
@@ -244,9 +265,6 @@ def enrich_unified_log(unified_log: Dict[str, Any]) -> Dict[str, Any]:
 
     raw_message = unified_log["eventMessage"]
     unified_log["appleEvent"] = {}
-    # On stock macOS this record would be redacted to <private>; used by the UI's
-    # "stock macOS visibility" toggle. Clones are always src=%{private}s.
-    unified_log["private_only"] = is_private_only(unified_log.get("formatString", ""))
 
     if "cloneForCompatability" in raw_message:
         unified_log["appleEvent"]["clone"] = extract_clone_src(raw_message)

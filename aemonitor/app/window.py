@@ -72,6 +72,7 @@ from aemonitor.app.model import (
     FACETS,
     INDICATORS,
     INDICATORS_BY_ID,
+    PRIVACY_MODES,
     EventStore,
     Monitor,
     Row,
@@ -80,6 +81,15 @@ from aemonitor.app.model import (
 )
 
 LOG_PATH = os.path.expanduser("~/Library/Logs/AEMonitor.log")
+
+# View > Logging Privacy: which logging configuration the table simulates.
+PRIVACY_MENU = (
+    ("private", "Enabled Private Data"),  # Enable-Private-Data: everything
+    ("public", "Set Default to Public"),  # Default-Privacy-Setting: Public; hides %{private}
+    ("default", "Default macOS Settings"),  # stock: %{public} only
+)
+PRIVACY_STATUS = dict(PRIVACY_MENU)
+del PRIVACY_STATUS["private"]  # nothing redacted, so no status note
 MUTED_DEFAULTS_KEY = "MutedValues"
 WRAP_DEFAULTS_KEY = "WrapLongLines"
 WRAPPING_COLUMNS = ("script", "reply")
@@ -331,9 +341,15 @@ class AppDelegate(NSObject):
         self.flagged_menu_item = item(m, "Flagged Only", "toggleFlaggedOnly:", "F", self)
         self.clones_menu_item = item(m, "Show Clone Events", "toggleClones:", "", self)
         self.clones_menu_item.setState_(1)
-        self.hide_private_menu_item = item(
-            m, "Stock macOS View (hide private-only events)", "toggleHidePrivate:", "", self
-        )
+        privacy_top = m.addItemWithTitle_action_keyEquivalent_("Logging Privacy", None, "")
+        privacy_menu = NSMenu.alloc().initWithTitle_("Logging Privacy")
+        privacy_top.setSubmenu_(privacy_menu)
+        self.privacy_menu_items = {}
+        for mode, title in PRIVACY_MENU:
+            mi = item(privacy_menu, title, "setPrivacyMode:", "", self)
+            mi.setRepresentedObject_(mode)
+            self.privacy_menu_items[mode] = mi
+        self._update_privacy_menu()
         item(m, "Clear Filters", "clearFilters:", "l", self)
         m.addItem_(NSMenuItem.separatorItem())
         self.wrap_menu_item = item(m, "Wrap Long Lines", "toggleWrap:", "", self)
@@ -637,9 +653,11 @@ class AppDelegate(NSObject):
         else:
             state = "Stopped"
         text = f"{state} · {len(self.store.rows):,} events · {len(self.filtered):,} shown"
-        if self.filter.hide_private:
-            hidden = sum(1 for r in self.store.rows if r.private_only)
-            text += f" · stock macOS view ({hidden:,} private-only hidden)"
+        mode = self.filter.privacy_mode
+        if mode in PRIVACY_STATUS:
+            revealed = PRIVACY_MODES[mode]
+            hidden = sum(1 for r in self.store.rows if r.privacy not in revealed)
+            text += f" · {PRIVACY_STATUS[mode]} ({hidden:,} redacted)"
         if self.store.private_data_seen:
             text += " · some fields are <private>: enable private data in unified logs to see full events"
         self.status_label.setStringValue_(text)
@@ -720,12 +738,18 @@ class AppDelegate(NSObject):
         self._refilter()
 
     @objc.IBAction
-    def toggleHidePrivate_(self, _sender) -> None:
-        # Hide events that carry no content on stock macOS (src/body is %{private}),
-        # leaving the visibility you'd actually have without private-data logging.
-        self.filter.hide_private = not self.filter.hide_private
-        self.hide_private_menu_item.setState_(int(self.filter.hide_private))
+    def setPrivacyMode_(self, sender) -> None:
+        # Show only what a Mac with this logging configuration would record: events
+        # whose payload it redacts can't be parsed there, so they'd never appear.
+        self.filter.privacy_mode = str(sender.representedObject())
+        self._update_privacy_menu()
         self._refilter()
+        self._update_status()
+
+    @objc.python_method
+    def _update_privacy_menu(self) -> None:
+        for mode, mi in self.privacy_menu_items.items():
+            mi.setState_(int(mode == self.filter.privacy_mode))
 
     @objc.python_method
     def _mute(self, facet: str, value: str) -> None:
