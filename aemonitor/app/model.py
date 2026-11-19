@@ -184,6 +184,11 @@ class Row:
         return part.get("return_id")
 
     @property
+    def private_only(self) -> bool:
+        """Every record behind this row would be redacted to <private> on stock macOS."""
+        return all(r.get("private_only") for r in self.records())
+
+    @property
     def correlation(self) -> Optional[Tuple[Any, Any]]:
         """Key linking a request to its reply: (threadID, returnID), or None if unknown."""
         rid, tid = self.return_id, self.thread_id
@@ -378,6 +383,7 @@ class RowFilter:
     query: str = ""
     only_flagged: bool = False
     show_clones: bool = True
+    hide_private: bool = False
     include: Dict[str, Set[str]] = field(default_factory=lambda: {f: set() for f in FACETS})
     muted: Set[Tuple[str, str]] = field(default_factory=set)
 
@@ -397,6 +403,8 @@ class RowFilter:
 
     def matches(self, row: Row) -> bool:
         if not self.show_clones and row.kind == "clone":
+            return False
+        if self.hide_private and row.private_only:
             return False
         if self.only_flagged and not row.flags:
             return False

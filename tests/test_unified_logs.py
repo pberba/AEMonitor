@@ -6,6 +6,7 @@ from aemonitor.unified_logs import (
     extract_apple_events,
     extract_clone_src,
     enrich_unified_log,
+    is_private_only,
 )
 
 
@@ -27,6 +28,79 @@ class TestExtractCloneSrc:
         """Non-clone messages return None."""
         assert extract_clone_src("sendToSelf(), event={syso,exec...}") is None
         assert extract_clone_src("") is None
+
+    def test_utxt_string_list_src(self):
+        """A list of utxt strings is decoded and joined (the bare `[` used to drop it)."""
+        msg = (
+            "cloneForCompatability(src=[utxt(44/$68007400740070003a002f002f006c006f0063"
+            "0061006c0068006f0073007400), utxt(22/$2f0074006d0070002f00610065007400650073"
+            "007400)] dst=0x0"
+        )
+        assert extract_clone_src(msg) == "http://localhost /tmp/aetest"
+
+    def test_compiled_javascript_scpt_placeholder(self):
+        """scpt carrying the JsOsaDAS magic becomes a typed placeholder (body is truncated)."""
+        msg = (
+            "cloneForCompatability(src=scpt(6864/$4a734f7361444153312e3030312e30306270"
+            "6c6973743030d101025673637269...) dst=0x16b9be954"
+        )
+        result = extract_clone_src(msg)
+        assert result is not None
+        assert "compiled JavaScript script" in result
+        assert "scpt" in result and "6864 bytes" in result
+
+    def test_compiled_applescript_direct_object_placeholder(self):
+        """A ---- direct object carrying FasdUAS magic is labelled compiled AppleScript."""
+        msg = (
+            "cloneForCompatability(src=----(45915/$4661736455415320312e3130312e31300e00"
+            "0000040fffff...) dst=0x0"
+        )
+        result = extract_clone_src(msg)
+        assert result is not None and "compiled AppleScript script" in result
+
+    def test_record_src_decompiles_to_applescript(self):
+        """A structured record src is routed through the decompiler instead of dropped."""
+        msg = (
+            "cloneForCompatability(src={aevt,odoc target='psn '[Finder] "
+            "{----=[utxt(10/$480065006c006c006f00)]} returnID=1} dst=0x0"
+        )
+        result = extract_clone_src(msg)
+        assert result is not None
+        assert 'tell application "Finder"' in result and '"Hello"' in result
+
+    def test_opaque_descriptors_still_dropped(self):
+        """Pointers and bare type codes carry no command content and stay dropped."""
+        assert extract_clone_src("cloneForCompatability(src=optr(8/$2063670a0b000000) dst=0x0") is None
+        assert extract_clone_src("cloneForCompatability(src=msng dst=0x0") is None
+
+
+class TestIsPrivateOnly:
+    """A record is 'private-only' when all its content comes from %{private} fields."""
+
+    def test_clone_format_string_is_private_only(self):
+        # Clones are always src=%{private}s: redacted to nothing on stock macOS.
+        assert is_private_only("%{public}scloneForCompatability(src=%{private}s dst=%p")
+
+    def test_public_apple_event_is_not_private_only(self):
+        # event=%s / reply=%s are public, so Apple Events survive on stock macOS.
+        assert not is_private_only("%{public}sfinishAndSendReply: %d event=%s reply=%s")
+
+    def test_partially_private_is_not_private_only(self):
+        # Has public content alongside the private field -> still partly visible.
+        assert not is_private_only("Resource lookup at %{private}@\n\tRequest: %{public}@")
+
+    def test_empty_format_string(self):
+        assert not is_private_only("")
+
+    def test_enrich_sets_private_only_flag(self):
+        clone = enrich_unified_log(
+            {
+                "eventMessage": "cloneForCompatability(src=utxt(22/$2f0074006d007000) dst=0x0",
+                "formatString": "%{public}scloneForCompatability(src=%{private}s dst=%p",
+                "processImagePath": "/usr/bin/osascript",
+            }
+        )
+        assert clone["private_only"] is True
 
     def test_decode_utxt_raw_full_hex(self):
         """decode_utxt_raw decodes full UTF-16LE hex."""
