@@ -303,3 +303,107 @@ class TestAppleScriptTokens:
 
     def test_unknown_codes_stay_plain(self):
         assert self._kinds("ascrgdut ") == []
+
+
+class TestBridgeCalls:
+    @staticmethod
+    def load(name):
+        import os
+
+        from aemonitor.cli import _iter_ndjson_from_file
+
+        prepare, store = RecordPreparer(), EventStore()
+        path = os.path.join(os.path.dirname(__file__), "fixtures", name)
+        for entry in _iter_ndjson_from_file(path):
+            record = prepare(entry)
+            if record is not None:
+                store.add(record)
+        return store
+
+    def test_one_row_per_call_with_results_attached(self):
+        store = self.load("objc_scenario_c.ndjson")
+        objc = [r for r in store.rows if r.kind == "objc"]
+        assert len(objc) == 117
+        verify = [r for r in objc if r.script.startswith("record1's verifyPassword")][0]
+        assert verify.reply_text == "{false, error1}"
+        assert verify.code == "objc"
+
+    def test_coercion_joins_the_result(self):
+        store = self.load("objc_scenario_b.ndjson")
+        read = [r for r in store.rows if r.script == "textField1's stringValue()"][0]
+        assert read.reply_text == 'stringValue1; as text --> "tstp1"'
+        assert {"objc.cred.prompt_with_input", "objc.cred.cleartext_leak"} <= read.finding_ids
+        assert read.severity == "high"
+        assert len(read.records()) == 3  # the call, its result, its coercion
+
+    def test_class_receiver_is_the_target(self):
+        store = self.load("objc_scenario_c.ndjson")
+        assert store.counts["target"]["ODSession"] == 2  # one per password attempt
+
+    def test_failed_lookup_is_an_error(self):
+        store = self.load("objc_scenario_c_download.ndjson")
+        failed = [r for r in store.rows if r.kind == "objc" and r.reply_error]
+        # The script ran twice, each run hitting the missing odSession class once
+        assert [r.reply_error for r in failed] == ["lookup failed", "lookup failed"]
+        assert "objc.bridge.failed_lookup" in failed[0].finding_ids
+
+    def test_failed_lookup_reply_joins_the_call(self):
+        # bridge.ndjson-style: the -1708 reply has the call's returnID, so it isn't a lone row
+        from test_objc import FAILED_LOOKUP
+
+        reply = (
+            "AE2000: (1258) Reply of SendToSelf ( err == -1708) "
+            "reply={aevt,ansr target='psn '[Script Editor] {errn=-1708} attr:{} returnID=26909}"
+        )
+        prepare, store = RecordPreparer(), EventStore()
+        for message in (FAILED_LOOKUP, reply):
+            record = prepare({"eventMessage": message, "processID": 1258, "threadID": 1})
+            if record is not None:
+                store.add(record)
+        assert [r.kind for r in store.rows] == ["objc"]
+        assert store.rows[0].reply is not None
+
+
+class TestBridgeCallStockView:
+    """Bridge calls are %{private}s clones: only Enable-Private-Data shows them."""
+
+    CLONE_FS = "%{public}scloneForCompatability(src=%{private}s dst=%p"
+    ANCHOR_FS = "%{public}sAEGetParamDesc for keyword %c%c%c%c type %c%c%c%c"
+    RESULT_FS = "%{public}s%{public}s(%{public}s) as %{public}s = %s err=%d/%{public}s"
+    EVENT_FS = "%{public}ssendToSelf(), event=%{public}s reply=0x%{public}s sendMode=%x timeout=%ld"
+    GPD = "OSErr AEGetParamDesc(const AppleEvent *, AEKeyword, DescType, AEDesc *)(----) as **** = "
+
+    def feed(self, *lines):
+        prepare, store = RecordPreparer(), EventStore()
+        for message, fs in lines:
+            entry = {"eventMessage": message, "formatString": fs, "processID": 1, "threadID": 1,
+                     "processImagePath": "/usr/bin/osascript"}
+            record = prepare(entry)
+            if record is not None:
+                store.add(record)
+        return [r for r in store.rows if r.kind == "objc"]
+
+    def test_call_with_result_is_private(self):
+        from test_objc import INSTANCE_STRING_VALUE
+
+        [row] = self.feed(
+            (INSTANCE_STRING_VALUE, self.CLONE_FS),
+            ("AEGetParamDesc for keyword errn type long", self.ANCHOR_FS),
+            (self.GPD + "1000 err=0/noErr", self.RESULT_FS),
+        )
+        assert row.reply_text == "1000"
+        # The result line is an unmarked %s ("default"), but the call decides
+        assert row.privacy == "private"
+        assert RowFilter(privacy_mode="private").matches(row)
+        assert not RowFilter(privacy_mode="public").matches(row)
+        assert not RowFilter(privacy_mode="default").matches(row)
+
+    def test_failed_lookup_event_is_public(self):
+        # The fallback is logged as event=%{public}s: a stock Mac sees the class and selector
+        from test_objc import FAILED_LOOKUP
+
+        clone = FAILED_LOOKUP.replace("sendToSelf(), event=", "cloneForCompatability(src=").split(" reply=")[0]
+        [row] = self.feed((clone + " dst=0x1", self.CLONE_FS), (FAILED_LOOKUP, self.EVENT_FS))
+        assert row.reply_error == "lookup failed"
+        assert row.privacy == "public"
+        assert RowFilter(privacy_mode="default").matches(row)

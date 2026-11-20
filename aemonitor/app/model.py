@@ -21,7 +21,9 @@ from aemonitor.cli import (
     _run_log_show,
     _run_log_stream,
 )
+from aemonitor.indicators import SPECS, IndicatorEngine
 from aemonitor.native_stream import NativeStreamUnavailable, iter_live_entries
+from aemonitor.objc_correlate import BridgeTracker, is_anchor, is_create, is_result
 from aemonitor.unified_logs import (
     PRIVACY_DEFAULT,
     PRIVACY_PRIVATE,
@@ -40,6 +42,8 @@ PRIVACY_MODES = {
     "default": {None, PRIVACY_PUBLIC},  # stock macOS
     "public": {None, PRIVACY_PUBLIC, PRIVACY_DEFAULT},  # Default-Privacy-Setting: Public
 }
+# Most visible first; None (no formatString to judge from) is always shown
+_PRIVACY_VISIBILITY = {None: 0, PRIVACY_PUBLIC: 1, PRIVACY_DEFAULT: 2, PRIVACY_PRIVATE: 3}
 _SEVERITY_RANK = {"high": 3, "medium": 2, "low": 1, "": 0}
 _ERRN = re.compile(r"errn=(-?\d+)")
 # "Reply of SendToSelf ( err == -1708)": the send itself failed, often with an empty reply
@@ -84,6 +88,41 @@ INDICATORS: List[Indicator] = [
               lambda r: r.code == "syso,dlog"),
     Indicator("finder-delete", "low", "Finder delete", "Defense Evasion · T1070.004",
               lambda r: r.target == "Finder" and r.code == "core,delo"),
+]
+
+
+# AppleScriptObjC bridge-call indicators (aemonitor.indicators) fire per process on the
+# record that completed them; they flag the row holding that record
+_OBJC_SEVERITY = {
+    "objc.cred.prompt_with_input": "high",
+    "objc.cred.cleartext_leak": "high",
+    "objc.cred.saved_to_disk": "high",
+    "objc.cred.reprompt_loop": "high",
+    "objc.cred.verify_result": "high",
+    "objc.cred.od_verify": "high",
+    "objc.lure.app_icon": "high",
+    "objc.cred.secure_field": "medium",
+    "objc.cred.window_raised": "medium",
+    "objc.net.session": "medium",
+    "objc.net.post": "medium",
+    "objc.file.stage": "medium",
+    "objc.exec.task": "medium",
+    "objc.recon.region": "medium",
+    "objc.bridge.failed_lookup": "low",
+    "objc.ui.alert": "low",
+    "objc.ui.headless_to_gui": "low",
+    "objc.net.url": "low",
+}
+
+
+def _finding_test(name: str) -> Callable[["Row"], bool]:
+    return lambda r: name in r.finding_ids
+
+
+INDICATORS += [
+    Indicator(name, _OBJC_SEVERITY.get(name, "low"), spec.description, "AppleScriptObjC",
+              _finding_test(name))
+    for name, spec in SPECS.items()
 ]
 INDICATORS_BY_ID = {i.id: i for i in INDICATORS}
 
@@ -168,6 +207,9 @@ class Row:
     flags: List[Indicator] = field(default_factory=list)
     severity: str = ""
     search_text: str = ""
+    # Bridge calls: result records (a return value, then maybe its `as text` coercion)
+    results: List[Dict[str, Any]] = field(default_factory=list)
+    finding_ids: Set[str] = field(default_factory=set)
 
     @property
     def base(self) -> Dict[str, Any]:
@@ -195,13 +237,21 @@ class Row:
 
     @property
     def return_id(self) -> Any:
-        part = self.event_part or self.reply_part or {}
+        part = self.event_part or self.reply_part or self.objc_part or {}
         return part.get("return_id")
 
     @property
     def privacy(self) -> Optional[str]:
         """Logging privacy of the record carrying this row's content (the request,
         or the lone reply/clone); see payload_privacy."""
+        if self.kind == "objc" and self.request is not None:
+            # A bridge call is a src=%{private}s clone, and its results mean nothing
+            # without it. A failed lookup is also logged on its own as a public
+            # event= line, so the row is as visible as the most visible of the two.
+            standalone = [self.request] + [
+                r for r in self.results if r["appleEvent"]["objc_result"].get("error")
+            ] + ([self.reply] if self.reply is not None else [])
+            return min((r.get("privacy") for r in standalone), key=_PRIVACY_VISIBILITY.get)
         return self.base.get("privacy")
 
     @property
@@ -218,8 +268,24 @@ class Row:
     def reply_part(self) -> Optional[Dict[str, Any]]:
         return self.reply["appleEvent"].get("reply") if self.reply else None
 
+    @property
+    def objc_part(self) -> Optional[Dict[str, Any]]:
+        """The bridge call, or the first result when the call itself wasn't seen."""
+        ae = self.base["appleEvent"]
+        return ae.get("objc") or ae.get("objc_result")
+
+    @property
+    def findings(self) -> List[Dict[str, Any]]:
+        return [f for r in self.records() for f in r.get("findings") or []]
+
     def records(self) -> List[Dict[str, Any]]:
         """Distinct log records behind this row, request first."""
+        if self.results:
+            return (
+                ([self.request] if self.request is not None else [])
+                + self.results
+                + ([self.reply] if self.reply is not None else [])
+            )
         if self.request is not None and self.reply is not None and self.request is not self.reply:
             return [self.request, self.reply]
         return [self.base]
@@ -229,6 +295,10 @@ class Row:
 
     def derive(self) -> None:
         ae = self.base["appleEvent"]
+        self.finding_ids = {f["indicator"] for f in self.findings}
+        if "objc" in ae or "objc_result" in ae:
+            self._derive_objc()
+            return
         if ae.get("clone") is not None:
             self.kind, self.code, self.script = "clone", "clone", ae["clone"]
         elif self.event_part:
@@ -245,6 +315,25 @@ class Row:
         self.raw = "\n".join(
             p.get("raw") or "" for p in (self.event_part, self.reply_part) if p
         )
+        self._derive_flags()
+
+    def _derive_objc(self) -> None:
+        call = (self.request or {}).get("appleEvent", {}).get("objc") or {}
+        results = [r["appleEvent"]["objc_result"] for r in self.results]
+        if not call and self.request is not None:
+            results.insert(0, self.request["appleEvent"]["objc_result"])
+        self.kind, self.code = "objc", "objc"
+        receiver = call.get("receiver") if call.get("receiver_kind") == "class" else call.get("receiver_class")
+        self.target = receiver or ""
+        self.script = call.get("applescript") or (results[0].get("call") if results else "") or ""
+        shown = [r["applescript"] for r in results if not r.get("void") and r.get("applescript")]
+        self.reply_text = "; ".join(shown)
+        errors = [r["error"] for r in results if r.get("error")]
+        self.reply_error = errors[0] if errors else None
+        self.raw = call.get("raw") or ""
+        self._derive_flags()
+
+    def _derive_flags(self) -> None:
         self.flags = [i for i in INDICATORS if i.test(self)]
         self.severity = max((f.severity for f in self.flags), key=_SEVERITY_RANK.get, default="")
         self.search_text = "\n".join(
@@ -260,18 +349,33 @@ HIDDEN_EVENT_CODES = {("ascr", "gdut")}
 class RecordPreparer:
     """Turns raw unified log entries into enriched records, dropping noise.
 
-    Stateful (repeated clones, and replies to hidden events, are dropped), so use one
-    per source.
+    Stateful (repeated clones, and replies to hidden events, are dropped; bridge calls
+    are paired with their results and indicators tracked per process), so use one per
+    source. Records that complete a bridge-call indicator carry it under "findings".
     """
 
     def __init__(self) -> None:
         self._last_clone: Optional[str] = None
         self._hidden: "OrderedDict[Tuple[Any, Any], None]" = OrderedDict()
+        self._tracker = BridgeTracker()
+        self._engine = IndicatorEngine()
 
     def __call__(self, entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        if "eventMessage" not in entry:
+        record = self._prepare(entry)
+        if record is not None:
+            findings = self._engine.feed(record)
+            if findings:
+                record["findings"] = [f.to_dict() for f in findings]
+        return record
+
+    def _prepare(self, entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        message = entry.get("eventMessage")
+        if message is None:
             return None
         entry.setdefault("processImagePath", "")
+        if is_create(message) or is_anchor(message) or is_result(message):
+            # Lines that only matter for pairing bridge calls with their results
+            return self._tracker.on_line(entry)
         try:
             record = enrich_unified_log(entry)
         except Exception:
@@ -283,6 +387,9 @@ class RecordPreparer:
         ae = record["appleEvent"] = {k: v for k, v in record["appleEvent"].items() if v is not None}
         if not ae:
             return None
+        if "objc" in ae:
+            # A bridge call, or (for a failed class lookup) the result of one
+            return self._tracker.on_call(record)
         event = ae.get("event")
         if (
             event is not None
@@ -333,6 +440,8 @@ class EventStore:
         self.private_data_seen = False
         self._pending: "OrderedDict[Tuple[Any, Any], Row]" = OrderedDict()
         self._pending_limit = pending_limit
+        # Bridge-call rows by (pid, returnID): results keep arriving after the first
+        self._objc: "OrderedDict[Tuple[Any, Any], Row]" = OrderedDict()
         self._next_id = 1
 
     def add(self, record: Dict[str, Any]) -> Tuple[Row, bool]:
@@ -341,9 +450,28 @@ class EventStore:
         if "<private>" in (record.get("eventMessage") or ""):
             self.private_data_seen = True
         ae = record["appleEvent"]
+        if "objc" in ae:
+            row = self._append(record, None)
+            self._objc[self._key(record, ae["objc"])] = row
+            if len(self._objc) > self._pending_limit:
+                self._objc.popitem(last=False)
+            return row, True
+        if "objc_result" in ae:
+            row = self._objc.get(self._key(record, ae["objc_result"]))
+            if row is None:
+                return self._append(record, None), True
+            self._count(row, -1)
+            row.results.append(record)
+            row.derive()
+            self._count(row, 1)
+            return row, False
         if "reply" in ae and "event" not in ae:
             # A reply logged by the sender: attach it to the request it answers
-            row = self._pending.pop(self._key(record, ae["reply"]), None)
+            key = self._key(record, ae["reply"])
+            row = self._pending.pop(key, None)
+            if row is None and key in self._objc and self._objc[key].reply is None:
+                # A failed bridge-call lookup is answered by a real reply (-1708)
+                row = self._objc[key]
             if row is not None:
                 self._count(row, -1)
                 row.reply = record
@@ -363,6 +491,7 @@ class EventStore:
     def clear(self) -> None:
         self.rows.clear()
         self._pending.clear()
+        self._objc.clear()
         for c in self.counts.values():
             c.clear()
 
@@ -472,14 +601,14 @@ class Monitor:
         if archive_path and archive_path.endswith(".ndjson"):
             entries = _iter_ndjson_from_file(archive_path)
         elif archive_path:
-            proc = _run_log_show(archive_path, _build_predicate(None))
+            proc = _run_log_show(archive_path, _build_predicate(None, objc_results=True))
             entries = _iter_ndjson_lines(proc)
         else:
             try:
-                entries = iter_live_entries(_build_predicate(None), stop)
+                entries = iter_live_entries(_build_predicate(None, objc_results=True), stop)
             except NativeStreamUnavailable as e:
                 print(f"aemonitor: native backend unavailable ({e}), using log stream", file=sys.stderr)
-                proc = _run_log_stream(_build_predicate(None))
+                proc = _run_log_stream(_build_predicate(None, objc_results=True))
                 entries = _iter_ndjson_lines(proc)
         self._stop, self._proc = stop, proc
         self.source = archive_path or ""

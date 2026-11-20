@@ -981,6 +981,8 @@ class AppDelegate(NSObject):
             body = row.reply_text if row.kind != "reply" else ""
             if row.reply_error and body:
                 prefix = f"error {row.reply_error}"
+                if row.kind == "objc" or not body.startswith(prefix):
+                    prefix = body  # a bridge-call error: the whole result
                 styled.add(prefix, _MONO_BOLD, NSColor.systemRedColor())
                 body = body[len(prefix):]
         # Clone sources are arbitrary captured output, not AppleScript, so leave them
@@ -1135,16 +1137,29 @@ class AppDelegate(NSObject):
             overview.add("● ", color=_severity_color(f.severity)).add(
                 f"{f.label}" + (f"  ({f.tactic})" if f.tactic else "") + "\n"
             )
+        for finding in row.findings:
+            # Bridge-call indicators name the calls that supported them
+            detail = f" ({finding['detail']})" if finding.get("detail") else ""
+            rids = ", ".join(str(r) for r in finding.get("return_ids") or [])
+            overview.add(f"  {finding['indicator']}{detail}  returnIDs: {rids}\n",
+                         color=NSColor.secondaryLabelColor())
         latency = ""
         if row.request is not None and row.reply is not None and row.request is not row.reply:
             latency = _latency(row.request.get("timestamp"), row.reply.get("timestamp"))
+        if row.kind == "objc":
+            latency = _latency(row.timestamp, row.results[-1].get("timestamp")) if row.results else ""
+            reply_state = ("error: " + row.reply_error) if row.reply_error else (
+                "returned" if row.results else "—"
+            )
+        else:
+            reply_state = ("error " + row.reply_error) if row.reply_error else ("ok" if rp else "—")
         meta = [
             ("Timestamp", row.timestamp),
             ("Process", f"{row.process_path} (pid {row.pid})"),
-            ("Return ID", (ev or rp or {}).get("return_id")),
+            ("Return ID", row.return_id),
             ("Thread", base.get("threadID")),
             ("User ID", base.get("userID")),
-            ("Reply", ("error " + row.reply_error) if row.reply_error else ("ok" if rp else "—")),
+            ("Reply", reply_state),
             ("Reply after", latency or "—"),
         ]
         overview.add("\n")
@@ -1154,11 +1169,20 @@ class AppDelegate(NSObject):
         if row.kind == "clone":
             # Clone sources are arbitrary captured output, not AppleScript
             overview.section("clone", row.script, highlight=False)
+        if row.kind == "objc":
+            # AppleScriptObjC bridge call: pseudo-AppleScript, then each result line
+            overview.section("call", row.script, highlight=True)
+            results = "\n".join(
+                "--> " + r["appleEvent"]["objc_result"]["applescript"] for r in row.results
+            )
+            overview.section("result", results or None, highlight=True)
         overview.section("event", ev and ev.get("applescript"), highlight=True)
         overview.section("reply", rp and rp.get("applescript"), highlight=True)
         views["overview"].textStorage().setAttributedString_(overview.text)
 
         raw = _Attributed()
+        if row.kind == "objc":
+            raw.section("call", row.raw or None)
         raw.section("event", ev and ev.get("raw")).section("reply", rp and rp.get("raw"))
         for r in row.records():
             raw.section("eventMessage", (r.get("eventMessage") or "").strip())

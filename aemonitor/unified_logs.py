@@ -5,6 +5,13 @@ from typing import Any, Dict, List, Optional
 
 from aemonitor.aedebug import parse_apple_event_debug, decode_utxt_raw, find_matching
 from aemonitor.ast import derive_ast
+from aemonitor.objc import (
+    decode_bridge_payload,
+    extract_clone_event,
+    is_bridge_clone,
+    is_bridge_event,
+    render_call,
+)
 
 NULL_IMPL = "0xNULL-impl"
 
@@ -260,6 +267,16 @@ def extract_apple_events(message: str) -> Dict[str, str]:
     return out
 
 
+def _bridge_call_record(payload: str, *, lookup_failed: bool = False) -> Optional[Dict[str, Any]]:
+    call = decode_bridge_payload(payload)
+    if call is None:
+        return None
+    record = {"raw": payload, **call, "applescript": render_call(call)}
+    if lookup_failed:
+        record["lookup_failed"] = True
+    return record
+
+
 def enrich_unified_log(unified_log: Dict[str, Any]) -> Dict[str, Any]:
     """Enrich a unified log entry with extracted Apple Events and decompiled AppleScript."""
 
@@ -267,11 +284,28 @@ def enrich_unified_log(unified_log: Dict[str, Any]) -> Dict[str, Any]:
     unified_log["appleEvent"] = {}
 
     if "cloneForCompatability" in raw_message:
+        if is_bridge_clone(raw_message):
+            # AppleScriptObjC bridge call: logged only as a clone, never as event={...}
+            payload = extract_clone_event(raw_message)
+            record = _bridge_call_record(payload) if payload else None
+            if record is None:
+                return None
+            unified_log["appleEvent"]["objc"] = record
+            return unified_log
         unified_log["appleEvent"]["clone"] = extract_clone_src(raw_message)
         return unified_log
 
     if "event=" not in raw_message and "reply=" not in raw_message:
         return None
+
+    if is_bridge_event(raw_message):
+        # A bridge call that fell back to a real event: seen when the receiving class
+        # does not exist (AppleScriptObjC then lets the event go unhandled, -1708)
+        payload = extract_apple_events(raw_message).get("event")
+        record = _bridge_call_record(payload, lookup_failed=True) if payload else None
+        if record is not None:
+            unified_log["appleEvent"]["objc"] = record
+            return unified_log
 
     # Extract Apple Events event and reply payloads from the raw message if present
     raw_apple_event = extract_apple_events(raw_message)

@@ -13,6 +13,8 @@ from applescript_decompiler.ast import (
     VariableRef,
 )
 
+from aemonitor.objc import default_namer, optr_to_ptr
+
 
 def get_command_name(event):
     return f'{event["event_class"]}{event["event_id"]}'
@@ -27,9 +29,20 @@ def get_target(event):
     return VariableRef(name=event["target"])
 
 
+def _object_ref(raw):
+    # optr(8/$...) is a little-endian pointer to an AppleScriptObjC object
+    return Keyword(default_namer(optr_to_ptr(raw)))
+
+
+# Bare tokens with a fixed AppleScript meaning
+_BARE_TOKENS = {"msng": "missing value", "obj": "(reference)"}
+
+
 def get_expression(expr):
     # It's short, it's probably an Apple term
     if isinstance(expr, str):
+        if expr in _BARE_TOKENS:
+            return Keyword(_BARE_TOKENS[expr])
         if len(expr) > 8:
             return StringLiteral(expr)
         return Keyword(expr)
@@ -37,6 +50,16 @@ def get_expression(expr):
         return NumberLiteral(expr)
     if isinstance(expr, list):
         return ListLiteral([get_expression(e) for e in expr])
+    if "__type__" in expr and expr["__type__"] == "optr":
+        return _object_ref(expr["__raw__"])
+    if (
+        "__type__" not in expr
+        and expr.get("want") == "ocid"
+        and isinstance(expr.get("seld"), dict)
+        and expr["seld"].get("__type__") == "optr"
+    ):
+        # Object specifier for an AppleScriptObjC instance (form=ID, want=ocid)
+        return _object_ref(expr["seld"]["__raw__"])
     if "__type__" not in expr and "want" in expr and "seld" in expr and "from" in expr:
         # likely the form, want, seld, from
         if expr["want"] != "prop":
