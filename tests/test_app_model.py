@@ -1,6 +1,19 @@
 """Tests for the app's event model (pairing, indicators, filtering)."""
 
-from aemonitor.app.model import EventStore, RecordPreparer, RowFilter, process_name, reply_summary
+import json
+import os
+
+from aemonitor.app.model import (
+    PRIVACY_MODES,
+    EventStore,
+    Monitor,
+    RecordPreparer,
+    RowFilter,
+    process_name,
+    reply_summary,
+)
+
+FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 
 EVENT = {
     "eventMessage": "sendToSelf(), event={syso,exec target='psn '[osascript] {----=utxt(32/$6b0069006c006c0061006c006c0020005400650072006d0069006e0061006c00...)} attr:{subj=NULL-impl,comp=8454145,scid=1,csig=65536} returnID=-27082} reply=0xNULL-impl sendMode=1043 timeout=7200",
@@ -407,3 +420,88 @@ class TestBridgeCallStockView:
         assert row.reply_error == "lookup failed"
         assert row.privacy == "public"
         assert RowFilter(privacy_mode="default").matches(row)
+
+
+def _ingest_file(entries, store=None):
+    store, prepare = store or EventStore(), RecordPreparer()
+    for e in entries:
+        record = prepare(dict(e))
+        if record is not None:
+            store.add(record)
+    return store
+
+
+def _fixture(name):
+    with open(os.path.join(FIXTURES, name)) as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def _exported(store):
+    """What File > Export writes: every record of every row, once."""
+    seen, out = set(), []
+    for row in store.rows:
+        for record in row.records():
+            if id(record) not in seen:
+                seen.add(id(record))
+                out.append(json.loads(json.dumps(record)))
+    return out
+
+
+ORPHAN_RESULT = {
+    "eventMessage": "OSErr AEGetParamDesc(const AppleEvent *, AEKeyword, DescType, AEDesc *)(----) as **** = 1000 err=0/noErr",
+    "formatString": "%{public}s%{public}s(%{public}s) as %{public}s = %s err=%d/%{public}s",
+    "processID": 1,
+    "processImagePath": "/x/applet",
+    "appleEvent": {"objc_result": {"return_id": 5, "selector": "runModal", "call": "alert1's runModal()",
+                                   "result": 1000, "void": False, "applescript": "1000"}},
+}
+
+
+class TestExportRoundTrip:
+    def test_reopened_export_keeps_bridge_results(self):
+        first = _ingest_file(_fixture("objc_scenario_a.ndjson"))
+        again = _ingest_file(_exported(first))
+        results = lambda s: [len(r.results) for r in s.rows if r.kind == "objc"]
+        assert sum(results(first)) > 0
+        assert results(again) == results(first)
+        assert [r.reply_text for r in again.rows] == [r.reply_text for r in first.rows]
+
+
+class TestPrivacyAccounting:
+    def test_result_without_its_call_row_is_private(self):
+        # Its call was a src=%{private}s clone, so stock macOS would never pair it
+        row, _ = EventStore().add(json.loads(json.dumps(ORPHAN_RESULT)))
+        assert row.kind == "objc" and row.privacy == "private"
+        assert not RowFilter(privacy_mode="public").matches(row)
+        assert RowFilter(privacy_mode="private").matches(row)
+
+    def test_counts_follow_rows_as_results_and_replies_attach(self):
+        store = _ingest_file(_fixture("objc_scenario_c_download.ndjson"))
+        _ingest(store, EVENT, REPLY, FAILED_REPLY)
+        for revealed in PRIVACY_MODES.values():
+            assert store.hidden_by(revealed) == sum(1 for r in store.rows if r.privacy not in revealed)
+        store.clear()
+        assert store.hidden_by(PRIVACY_MODES["default"]) == 0
+
+
+class TestMonitorSources:
+    @staticmethod
+    def _load(monitor, path):
+        monitor.start(str(path))
+        monitor._thread.join(5)
+        return monitor.drain()
+
+    def test_reads_jsonl_directly(self, tmp_path):
+        path = tmp_path / "capture.jsonl"
+        path.write_text(json.dumps(EVENT) + "\n")
+        monitor = Monitor()
+        records = self._load(monitor, path)
+        assert [r["appleEvent"]["event"]["event_class"] for r in records] == ["syso"]
+        assert monitor.backend == ""  # not handed to `log show`
+
+    def test_new_source_drops_records_the_last_one_left_undrained(self, tmp_path):
+        path = tmp_path / "capture.ndjson"
+        path.write_text(json.dumps(EVENT) + "\n")
+        monitor = Monitor()
+        monitor._records.append({"from": "previous source"})
+        assert all("from" not in r for r in self._load(monitor, path))

@@ -28,6 +28,21 @@ class TestBuildPredicate:
         assert 'process == "Finder"' in result
         assert " AND " in result
 
+    @pytest.mark.parametrize("prefix", cli.CLONE_SRC_PREFIXES)
+    def test_admits_every_clone_encoding_that_decodes(self, prefix):
+        # Only quoted sources used to pass, so utxt/list/record/compiled-script clones
+        # never reached extract_clone_src outside .ndjson files
+        assert "eventMessage contains " + json.dumps(f"cloneForCompatability(src={prefix}") in BASE_PREDICATE
+
+
+class TestNdjsonPath:
+    @pytest.mark.parametrize("path", ["a.ndjson", "a.jsonl", "A.JSONL"])
+    def test_json_lines_files(self, path):
+        assert cli.is_ndjson_path(path)
+
+    def test_archive(self):
+        assert not cli.is_ndjson_path("capture.logarchive")
+
 
 class TestProcessAndOutput:
     """Test _process_and_output with sample unified log entries."""

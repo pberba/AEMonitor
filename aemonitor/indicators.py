@@ -11,10 +11,29 @@ matches on prefixes, case-sensitively.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from aemonitor.objc import UTXT_LOGGED_CHARS
+from aemonitor.objc_correlate import process_key
+
+# Bounds so a long live session doesn't grow without limit
+MAX_PROCS = 256  # processes tracked at once; the least recently active is forgotten
+MAX_CALLS = 4096  # calls (and tainted pointers) remembered per process
+MAX_RIDS = 32  # supporting returnIDs kept per list
+
+
+def _append_capped(items: List[Any], item: Any, limit: int = MAX_RIDS) -> None:
+    items.append(item)
+    if len(items) > limit:
+        del items[0]
+
+
+def _set_capped(mapping: Dict[Any, Any], key: Any, value: Any, limit: int = MAX_CALLS) -> None:
+    mapping[key] = value
+    if len(mapping) > limit:
+        del mapping[next(iter(mapping))]  # oldest (dicts keep insertion order)
 
 
 @dataclass(frozen=True)
@@ -214,7 +233,8 @@ class IndicatorEngine:
     """
 
     def __init__(self) -> None:
-        self._procs: Dict[Any, _ProcState] = {}
+        # Keyed by pid + executable, so a reused pid doesn't inherit another process's state
+        self._procs: "OrderedDict[Tuple[Any, str], _ProcState]" = OrderedDict()
         self._order: List[Finding] = []
 
     def findings(self) -> List[Finding]:
@@ -223,9 +243,15 @@ class IndicatorEngine:
     def feed(self, record: Dict[str, Any]) -> List[Finding]:
         ae = record.get("appleEvent") or {}
         pid = record.get("processID")
-        st = self._procs.setdefault(pid, _ProcState())
-        if not st.process:
-            st.process = (record.get("processImagePath") or "").rsplit("/", 1)[-1]
+        key = process_key(record)
+        st = self._procs.get(key)
+        if st is None:
+            st = self._procs[key] = _ProcState()
+            st.process = key[1].rsplit("/", 1)[-1]
+            if len(self._procs) > MAX_PROCS:
+                self._procs.popitem(last=False)
+        else:
+            self._procs.move_to_end(key)
         out: List[Finding] = []
         if "objc" in ae:
             self._on_call(st, pid, ae["objc"], out)
@@ -262,14 +288,14 @@ class IndicatorEngine:
         cls = call.get("receiver") if kind == "class" else call.get("receiver_class")
         cls = cls or ""
         args = call.get("args") or []
-        st.calls[rid] = call
+        _set_capped(st.calls, rid, call)
 
         if call.get("lookup_failed") and kind == "class":
             self._fire(st, pid, "objc.bridge.failed_lookup", [rid], out, f"{cls}'s {sel}")
 
         # --- UI
         if kind == "class" and cls.startswith("NSAlert"):
-            st.alert_rids.append(rid)
+            _append_capped(st.alert_rids, rid)
         if sel == "runModal" and st.alert_rids:
             self._fire(st, pid, "objc.ui.alert", [st.alert_rids[-1], rid], out)
         if sel.startswith("setActivationPol"):
@@ -281,12 +307,12 @@ class IndicatorEngine:
         if kind == "class" and cls.startswith("NSSecureTextFiel"):
             self._fire(st, pid, "objc.cred.secure_field", [rid], out)
         if kind == "class" and cls.startswith(_TEXT_FIELDS):
-            st.text_field_rids.append(rid)
+            _append_capped(st.text_field_rids, rid)
         if sel.startswith("setAccessoryView") and st.text_field_rids:
             st.accessory_rid = rid
             st.prompt_modal_rid = None
             st.prompts += 1
-            st.prompt_rids.append(rid)
+            _append_capped(st.prompt_rids, rid)
             if st.prompts >= 2 and st.failed_check_since_prompt:
                 self._fire(
                     st,
@@ -319,7 +345,7 @@ class IndicatorEngine:
             # A password check; a prompt shown again after it means it failed. A TRUE
             # result (when results are captured) clears this again.
             st.failed_check_since_prompt = True
-            st.failed_check_rids.append(rid)
+            _append_capped(st.failed_check_rids, rid)
 
         # --- credential handling
         if sel.startswith("writeToFile_atom"):
@@ -345,7 +371,7 @@ class IndicatorEngine:
 
         # --- lure
         if sel.startswith(("pathForResource_", "initByReferencin", "initWithContents")):
-            st.icon_source_rids.append(rid)
+            _append_capped(st.icon_source_rids, rid)
         if sel.startswith("setIcon_") and st.alert_rids:
             sources = st.icon_source_rids[-2:]
             names = [
@@ -424,7 +450,7 @@ class IndicatorEngine:
                     st.secrets.add(text_value["value"])
             ptr = _ptr(value)
             if ptr:
-                st.tainted[ptr] = rid
+                _set_capped(st.tainted, ptr, rid)
 
         # Objects derived from a tainted pointer or from a typed secret stay tainted
         ptr = _ptr(value)
@@ -435,7 +461,7 @@ class IndicatorEngine:
             )
             from_secret = any(self._is_secret(st, a) for a in args)
             if (from_taint or from_secret) and ptr not in st.tainted:
-                st.tainted[ptr] = rid
+                _set_capped(st.tainted, ptr, rid)
 
     # --- Apple events ---------------------------------------------------------------------
 
@@ -448,7 +474,9 @@ class IndicatorEngine:
             # A shell password check; with a prompt shown, a second prompt means it failed
             if st.prompts >= 1:
                 st.failed_check_since_prompt = True
-                st.failed_check_rids.extend(r for r in rids if r is not None)
+                for r in rids:
+                    if r is not None:
+                        _append_capped(st.failed_check_rids, r)
 
 
 def summarize(findings: Iterable[Finding]) -> List[str]:

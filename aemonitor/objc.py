@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Optional
 
-from aemonitor.aedebug import decode_utxt_raw, parse_apple_event_debug
+from aemonitor.aedebug import decode_utxt_raw, find_matching, parse_apple_event_debug
 
 BRIDGE_EVENT = ("ascr", "psbr")
 BRIDGE_CLONE_MARKER = "cloneForCompatability(src={ascr,psbr"
@@ -45,18 +45,10 @@ def is_bridge_event(message: str) -> bool:
 
 
 def extract_balanced(text: str, start: int) -> Optional[str]:
-    """Return the balanced {...} block starting at text[start], or None."""
-    if start >= len(text) or text[start] != "{":
-        return None
-    depth = 0
-    for i in range(start, len(text)):
-        if text[i] == "{":
-            depth += 1
-        elif text[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : i + 1]
-    return None
+    """Return the balanced {...} block starting at text[start], or None. Braces inside
+    quoted values don't count."""
+    end = find_matching(text, start, "{", "}")
+    return text[start : end + 1] if end != -1 else None
 
 
 def extract_clone_event(message: str) -> Optional[str]:

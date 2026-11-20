@@ -39,6 +39,14 @@ class TestExtract:
     def test_not_a_clone(self):
         assert extract_clone_event("event={ascr,psbr }") is None
 
+    def test_braces_inside_quoted_values_do_not_count(self):
+        msg = (
+            "cloneForCompatability(src={ascr,psbr target='psn '[Script Editor] "
+            '{snam=utxt(10/$61006c006c006f006300),refn="file:///tmp/a}b",----=[]} '
+            "returnID=1} dst=0x1"
+        )
+        assert extract_clone_event(msg).endswith("returnID=1}")
+
 
 class TestReceivers:
     def test_class_complete(self):

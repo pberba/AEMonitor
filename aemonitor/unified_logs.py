@@ -69,10 +69,16 @@ def _extract_src_raw(message: str) -> Optional[str]:
     start = i
     depth = 0
     in_quote = ""
+    escaped = False
     while i < len(message):
         ch = message[i]
         if in_quote:
-            if ch == in_quote and message[i - 1] != "\\":
+            # Track escapes rather than peeking back, so `\\"` closes the string
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == in_quote:
                 in_quote = ""
         elif ch in "\"'":
             in_quote = ch

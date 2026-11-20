@@ -231,3 +231,17 @@ class TestPredicate:
         monkeypatch.setattr(cli, "iter_live_entries", fake_iter)
         cli._stream_or_parse(output_format="ndjson", backend="native", indicators=True)
         assert "errn type long" in seen["predicate"]
+
+
+class TestProcessIdentity:
+    def test_reused_pid_gets_its_own_findings(self):
+        # The same pid reused by an unrelated program fires its own indicators;
+        # each indicator still fires only once per process
+        session = OutputSession("ndjson", indicators=True, use_color=False)
+        entries = list(_iter_ndjson_from_file(os.path.join(FIXTURES, "objc_scenario_a_osascript.ndjson")))
+        for image in ("/usr/bin/osascript", "/tmp/other", "/tmp/other"):
+            for e in entries:
+                session.process({**e, "processImagePath": image})
+        names = [f.name for f in session.engine.findings()]
+        assert names.count("objc.ui.alert") == 2
+        assert {f.process for f in session.engine.findings()} == {"osascript", "other"}

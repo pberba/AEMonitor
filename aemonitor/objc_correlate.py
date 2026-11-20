@@ -42,6 +42,10 @@ ERR_DESC_NOT_FOUND = -1701
 
 MAX_STACK = 64
 MAX_SEEN = 1024
+# Processes and threads tracked at once; the least recently active are forgotten so a
+# long live session doesn't grow without bound
+MAX_PROCS = 256
+MAX_THREADS = 1024
 
 TEXT_FIELD_CLASSES = ("NSTextField", "NSSecureTextFiel")
 SECURE_FIELD_CLASS = "NSSecureTextFiel"
@@ -94,11 +98,17 @@ def selector_base_name(sel: str) -> str:
     return head or "obj"
 
 
-def _thread_key(entry: Dict[str, Any]) -> Tuple[Any, Any]:
+def process_key(entry: Dict[str, Any]) -> Tuple[Any, str]:
+    """A process: its pid plus its executable, so state never carries over to an
+    unrelated process that later reuses the pid."""
     return (
         entry.get("processID") or entry.get("processIdentifier"),
-        entry.get("threadID") or entry.get("threadIdentifier"),
+        entry.get("processImagePath") or "",
     )
+
+
+def _thread_key(entry: Dict[str, Any]) -> Tuple[Tuple[Any, str], Any]:
+    return (process_key(entry), entry.get("threadID") or entry.get("threadIdentifier"))
 
 
 class _Frame:
@@ -142,18 +152,24 @@ class BridgeTracker:
     """
 
     def __init__(self) -> None:
-        self._procs: Dict[Any, _Process] = {}
-        self._stacks: Dict[Tuple[Any, Any], List[_Frame]] = {}
-        # (pid, tid) -> (call, result) for the last popped call that returned an object
+        # Keyed by process_key(); "pid" below always means that key
+        self._procs: "OrderedDict[Any, _Process]" = OrderedDict()
+        self._stacks: "OrderedDict[Tuple[Any, Any], List[_Frame]]" = OrderedDict()
+        # (process, tid) -> (call, result) for the last popped call that returned an object
         self._last_pop: Dict[Tuple[Any, Any], Tuple[Dict[str, Any], Any]] = {}
         self._seen: "OrderedDict[Tuple[Any, Any], Dict[str, Any]]" = OrderedDict()
 
     # --- public ---------------------------------------------------------------
 
     def proc(self, pid: Any) -> _Process:
-        if pid not in self._procs:
-            self._procs[pid] = _Process()
-        return self._procs[pid]
+        proc = self._procs.get(pid)
+        if proc is None:
+            proc = self._procs[pid] = _Process()
+            if len(self._procs) > MAX_PROCS:
+                self._procs.popitem(last=False)
+        else:
+            self._procs.move_to_end(pid)
+        return proc
 
     def namer(self, pid: Any):
         return self.proc(pid).name
@@ -188,6 +204,10 @@ class BridgeTracker:
 
     def on_line(self, entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Handle a raw line: an event creation, an errn anchor or a `(----)` result."""
+        if (entry.get("appleEvent") or {}).get("objc_result") is not None:
+            # Already paired, e.g. re-reading an AEMonitor export: the anchor and
+            # event-creation lines that paired it aren't in the file, so keep it as is
+            return entry
         message = entry.get("eventMessage") or ""
         key = _thread_key(entry)
         if is_create(message):
@@ -208,7 +228,14 @@ class BridgeTracker:
             self._seen.popitem(last=False)
 
     def _push(self, key, frame: _Frame) -> None:
-        stack = self._stacks.setdefault(key, [])
+        stack = self._stacks.get(key)
+        if stack is None:
+            stack = self._stacks[key] = []
+            if len(self._stacks) > MAX_THREADS:
+                old, _ = self._stacks.popitem(last=False)
+                self._last_pop.pop(old, None)
+        else:
+            self._stacks.move_to_end(key)
         # A frame that returned but whose result never came (an error) is done
         while stack and stack[-1].armed:
             stack.pop()

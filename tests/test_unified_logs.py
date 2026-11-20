@@ -29,6 +29,11 @@ class TestExtractCloneSrc:
         assert extract_clone_src("sendToSelf(), event={syso,exec...}") is None
         assert extract_clone_src("") is None
 
+    def test_quoted_src_ending_in_escaped_backslash(self):
+        # `\\"` is an escaped backslash then the closing quote, not an escaped quote
+        msg = 'cloneForCompatability(src="echo C:\\\\" dst=0x16ef41dbc'
+        assert extract_clone_src(msg) == "echo C:\\\\"
+
     def test_utxt_string_list_src(self):
         """A list of utxt strings is decoded and joined (the bare `[` used to drop it)."""
         msg = (

@@ -20,6 +20,7 @@ from aemonitor.cli import (
     _iter_ndjson_lines,
     _run_log_show,
     _run_log_stream,
+    is_ndjson_path,
 )
 from aemonitor.indicators import SPECS, IndicatorEngine
 from aemonitor.native_stream import NativeStreamUnavailable, iter_live_entries
@@ -244,6 +245,12 @@ class Row:
     def privacy(self) -> Optional[str]:
         """Logging privacy of the record carrying this row's content (the request,
         or the lone reply/clone); see payload_privacy."""
+        if self.kind == "objc" and self.request is not None and "objc" not in self.request["appleEvent"]:
+            # Results whose call row is gone (evicted). A result is only ever paired
+            # because its call was seen in a src=%{private}s clone, so it is as hidden
+            # as that call; a failed-lookup error comes from its own event= line.
+            first = self.request["appleEvent"]["objc_result"]
+            return self.request.get("privacy") if first.get("error") else PRIVACY_PRIVATE
         if self.kind == "objc" and self.request is not None:
             # A bridge call is a src=%{private}s clone, and its results mean nothing
             # without it. A failed lookup is also logged on its own as a public
@@ -437,6 +444,8 @@ class EventStore:
     def __init__(self, pending_limit: int = 5000) -> None:
         self.rows: List[Row] = []
         self.counts: Dict[str, Counter] = {f: Counter() for f in FACETS}
+        # Rows per Row.privacy class, kept in step with the rows (see _count)
+        self.privacy_counts: Counter = Counter()
         self.private_data_seen = False
         self._pending: "OrderedDict[Tuple[Any, Any], Row]" = OrderedDict()
         self._pending_limit = pending_limit
@@ -492,8 +501,13 @@ class EventStore:
         self.rows.clear()
         self._pending.clear()
         self._objc.clear()
+        self.privacy_counts.clear()
         for c in self.counts.values():
             c.clear()
+
+    def hidden_by(self, revealed: Set[Optional[str]]) -> int:
+        """How many rows a logging configuration revealing these classes would not record."""
+        return sum(n for cls, n in self.privacy_counts.items() if cls not in revealed)
 
     @staticmethod
     def _key(record: Dict[str, Any], part: Dict[str, Any]) -> Tuple[Any, Any]:
@@ -508,6 +522,8 @@ class EventStore:
         return row
 
     def _count(self, row: Row, delta: int) -> None:
+        # Called with -1 before a row changes and +1 after, so privacy stays in step
+        self.privacy_counts[row.privacy] += delta
         for facet in ("process", "target", "code"):
             value = row.facet_value(facet)
             if value:
@@ -596,9 +612,12 @@ class Monitor:
     def start(self, archive_path: Optional[str] = None) -> None:
         """Stream live (no path) or read a .logarchive / .ndjson file."""
         self.stop()
+        with self._lock:
+            # Records the previous source queued but the UI hasn't drained yet
+            self._records = []
         stop = threading.Event()
         proc: Optional[subprocess.Popen] = None
-        if archive_path and archive_path.endswith(".ndjson"):
+        if archive_path and is_ndjson_path(archive_path):
             entries = _iter_ndjson_from_file(archive_path)
         elif archive_path:
             proc = _run_log_show(archive_path, _build_predicate(None, objc_results=True))
@@ -642,6 +661,10 @@ class Monitor:
                 record = prepare(entry)
                 if record is not None:
                     with self._lock:
+                        # stop() only waits 2 s; a run still finishing after a new
+                        # source started must not add to the new source's events
+                        if stop.is_set():
+                            break
                         self._records.append(record)
         finally:
             if proc is not None:

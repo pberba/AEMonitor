@@ -655,8 +655,7 @@ class AppDelegate(NSObject):
         text = f"{state} · {len(self.store.rows):,} events · {len(self.filtered):,} shown"
         mode = self.filter.privacy_mode
         if mode in PRIVACY_STATUS:
-            revealed = PRIVACY_MODES[mode]
-            hidden = sum(1 for r in self.store.rows if r.privacy not in revealed)
+            hidden = self.store.hidden_by(PRIVACY_MODES[mode])
             text += f" · {PRIVACY_STATUS[mode]} ({hidden:,} redacted)"
         if self.store.private_data_seen:
             text += " · some fields are <private>: enable private data in unified logs to see full events"

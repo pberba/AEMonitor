@@ -4,7 +4,12 @@ import os
 
 import pytest
 
-from aemonitor.objc_correlate import BridgeTracker, class_base_name, selector_base_name
+from aemonitor.objc_correlate import (
+    MAX_THREADS,
+    BridgeTracker,
+    class_base_name,
+    selector_base_name,
+)
 from aemonitor.unified_logs import enrich_unified_log
 
 from test_objc import (
@@ -147,6 +152,31 @@ class TestNames:
         f = Feeder()
         rec = f(INSTANCE_STRING_VALUE)
         assert rec["appleEvent"]["objc"]["applescript"] == "obj1's stringValue()"
+
+    def test_reused_pid_starts_fresh(self):
+        # pid 7 exits and an unrelated program gets it: no names, and no "already
+        # seen" returnIDs, carry over
+        tracker = BridgeTracker()
+
+        def call(message, image):
+            e = {"eventMessage": message, "processID": 7, "threadID": 1, "processImagePath": image}
+            return tracker.on_call(enrich_unified_log(e))
+
+        assert call(INSTANCE_STRING_VALUE, "/x/first")["appleEvent"]["objc"]["applescript"].startswith("obj1")
+        second = call(INSTANCE_VERIFY_PASSWORD, "/x/second")
+        assert second["appleEvent"]["objc"]["applescript"].startswith("obj1")
+        assert call(INSTANCE_STRING_VALUE, "/x/second") is not None  # its own returnID space
+
+    def test_tracked_threads_are_bounded(self):
+        f = Feeder()
+        for tid in range(MAX_THREADS + 50):
+            f(CREATE.format("core,getd"), tid=tid)
+        assert len(f.tracker._stacks) == MAX_THREADS
+
+    def test_already_paired_result_is_kept(self):
+        # Re-reading an AEMonitor export: the anchor lines that paired it are gone
+        rec = {**entry(GPD + "1000 err=0/noErr"), "appleEvent": {"objc_result": {"return_id": 4313}}}
+        assert BridgeTracker().on_line(rec) is rec
 
     def test_aliases_are_per_process(self):
         f = Feeder()

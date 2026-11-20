@@ -35,11 +35,17 @@ from aemonitor.indicators import Finding, IndicatorEngine, hex_needles, summariz
 from aemonitor.objc_correlate import BridgeTracker, is_anchor, is_create, is_result
 from aemonitor.unified_logs import enrich_unified_log
 
-# Apple events: event=, reply=+returnID=, and cloneForCompatability with a quoted src
+# cloneForCompatability src encodings extract_clone_src can turn into text: quoted
+# strings, utxt, lists of strings, records, and compiled scripts (as a placeholder)
+CLONE_SRC_PREFIXES = ('"', "utxt(", "[", "{", "scpt(", "tdta(", "----(")
+# Apple events: event=, reply=+returnID=, and cloneForCompatability sources
 _AE_CLAUSES = (
     'eventMessage contains[c] "event={" OR '
     '(eventMessage contains[c] "reply={" AND eventMessage contains[c] "returnID=") OR '
-    '(eventMessage contains[c] "cloneForCompatability(" AND (eventMessage contains[c] "src=\\""))'
+    + " OR ".join(
+        "eventMessage contains " + json.dumps(f"cloneForCompatability(src={p}")
+        for p in CLONE_SRC_PREFIXES
+    )
 )
 # AppleScriptObjC bridge calls: one cloneForCompatability(src={ascr,psbr ...}) per call
 _OBJC_CLAUSE = 'eventMessage contains "cloneForCompatability(src={ascr,psbr"'
@@ -136,6 +142,14 @@ def _iter_ndjson_lines(proc: subprocess.Popen) -> Iterator[Dict[str, Any]]:
             yield entry
         except json.JSONDecodeError:
             continue
+
+
+NDJSON_SUFFIXES = (".ndjson", ".jsonl")
+
+
+def is_ndjson_path(path: str) -> bool:
+    """JSON-lines files are read directly; anything else goes to `log show`."""
+    return path.lower().endswith(NDJSON_SUFFIXES)
 
 
 def _iter_ndjson_from_file(path: str) -> Iterator[Dict[str, Any]]:
@@ -534,7 +548,7 @@ def _stream_or_parse(
     predicate = _build_predicate(
         predicate_extra, objc=objc, objc_results=objc and (objc_results or indicators)
     )
-    if archive_path and archive_path.endswith(".ndjson"):
+    if archive_path and is_ndjson_path(archive_path):
         # Read line-by-line from NDJSON file (no log command needed)
         entries = _iter_ndjson_from_file(archive_path)
     elif archive_path:
@@ -700,8 +714,8 @@ def main() -> int:
             return _stream_or_parse(archive_path=None, backend=args.backend, **options)
         if args.command == "parse":
             input_path = args.input
-            # Only need log command for .logarchive; .ndjson is read directly
-            if not input_path.endswith(".ndjson") and (
+            # Only need log command for .logarchive; .ndjson/.jsonl is read directly
+            if not is_ndjson_path(input_path) and (
                 not os.path.isfile("/usr/bin/log")
                 or not os.access("/usr/bin/log", os.X_OK)
             ):
