@@ -68,6 +68,8 @@ MANIFEST
 #   before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+# ...except the app's PyInstaller spec, which is checked in
+!aemonitor/app/AEMonitor.spec
 
 # Installer logs
 pip-log.txt

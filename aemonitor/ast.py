@@ -1,4 +1,5 @@
 import logging
+import re
 from applescript_decompiler.ast import (
     BinaryOp,
     BinaryOpKind,
@@ -11,6 +12,8 @@ from applescript_decompiler.ast import (
     StringLiteral,
     VariableRef,
 )
+
+from aemonitor.objc import default_namer, optr_to_ptr
 
 
 def get_command_name(event):
@@ -26,9 +29,20 @@ def get_target(event):
     return VariableRef(name=event["target"])
 
 
+def _object_ref(raw):
+    # optr(8/$...) is a little-endian pointer to an AppleScriptObjC object
+    return Keyword(default_namer(optr_to_ptr(raw)))
+
+
+# Bare tokens with a fixed AppleScript meaning
+_BARE_TOKENS = {"msng": "missing value", "obj": "(reference)"}
+
+
 def get_expression(expr):
     # It's short, it's probably an Apple term
     if isinstance(expr, str):
+        if expr in _BARE_TOKENS:
+            return Keyword(_BARE_TOKENS[expr])
         if len(expr) > 8:
             return StringLiteral(expr)
         return Keyword(expr)
@@ -36,6 +50,16 @@ def get_expression(expr):
         return NumberLiteral(expr)
     if isinstance(expr, list):
         return ListLiteral([get_expression(e) for e in expr])
+    if "__type__" in expr and expr["__type__"] == "optr":
+        return _object_ref(expr["__raw__"])
+    if (
+        "__type__" not in expr
+        and expr.get("want") == "ocid"
+        and isinstance(expr.get("seld"), dict)
+        and expr["seld"].get("__type__") == "optr"
+    ):
+        # Object specifier for an AppleScriptObjC instance (form=ID, want=ocid)
+        return _object_ref(expr["seld"]["__raw__"])
     if "__type__" not in expr and "want" in expr and "seld" in expr and "from" in expr:
         # likely the form, want, seld, from
         if expr["want"] != "prop":
@@ -113,9 +137,45 @@ def get_arguments(event):
     return ret
 
 
-def derive_ast(event):
-    return CommandCall(
+# aevt/ansr is the standard Apple Event "answer" (a reply), not a command. The
+# decompiler has no terminology for it, so rendering it as a command produced a
+# bogus "aevtansr ..." statement (e.g. tell application "X" aevtansr {...}); for a
+# reply we want just the answer value instead.
+ANSWER_EVENT = ("aevt", "ansr")
+
+
+def _derive_answer_value(event):
+    params = event.get("params") or {}
+    if "----" in params:
+        node = get_expression(params["----"])
+    else:
+        fields = [
+            RecordField(label=Keyword(k), value=get_expression(v))
+            for k, v in params.items()
+            if "---" not in k
+        ]
+        if not fields:
+            return ""
+        node = RecordLiteral(fields=fields)
+    source = node.to_source()
+    # CommandCall.to_source wraps in parens; a bare expression usually doesn't, but
+    # strip a matching outer pair (e.g. a parenthesized object spec) if present.
+    if source.startswith("(") and source.endswith(")"):
+        source = source[1:-1]
+    return source
+
+
+def derive_ast(event, omit_target=False):
+    if (event.get("event_class"), event.get("event_id")) == ANSWER_EVENT:
+        return _derive_answer_value(event)
+    source = CommandCall(
         target=get_target(event),
         command_name=get_command_name(event),
         arguments=get_arguments(event),
     ).to_source()[1:-1]
+    if omit_target:
+        # The target is kept so the decompiler can resolve the app's terminology
+        # (command codes like coredosc -> "do script" via SDEFS[target]); drop the now
+        # redundant "tell application X" prefix it produced.
+        source = re.sub(r'^tell application "[^"]*" ', "", source, count=1)
+    return source

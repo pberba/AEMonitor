@@ -21,6 +21,10 @@ aemonitor = "aemonitor.cli:main"
 dev = ["pytest>=7"]
 native = ["pyobjc-core>=10", "pyobjc-framework-Cocoa>=10"]
 
+[dependency-groups]
+# Build AEMonitor.app: uv run --group app pyinstaller --noconfirm aemonitor/app/AEMonitor.spec
+app = ["aemonitor[native]", "pyinstaller>=6.10"]
+
 [tool.uv]
 # uv uses standard pyproject.toml; uv sync / uv run work with the git dependency above
 

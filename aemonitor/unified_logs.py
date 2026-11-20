@@ -1,12 +1,34 @@
 import re
 import os
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
-from aemonitor.aedebug import parse_apple_event_debug, decode_utxt_raw
+from aemonitor.aedebug import parse_apple_event_debug, decode_utxt_raw, find_matching
 from aemonitor.ast import derive_ast
+from aemonitor.objc import (
+    decode_bridge_payload,
+    extract_clone_event,
+    is_bridge_clone,
+    is_bridge_event,
+    render_call,
+)
 
 NULL_IMPL = "0xNULL-impl"
+
+# First bytes of an OSA compiled-script blob identify the scripting language it
+# was compiled with. The unified log truncates these blobs to ~32 bytes, so the
+# script body is never recoverable; only the language, container type and
+# declared length can be surfaced.
+_OSA_MAGICS = {
+    "4a734f7361444153": "JavaScript",  # "JsOsaDAS" (JXA)
+    "4661736455415320": "AppleScript",  # "FasdUAS "
+}
+
+# A printf-style conversion specifier in a unified-log formatString, capturing an
+# optional {...} annotation (e.g. {private}, {public}) and the conversion char.
+_SPEC_RE = re.compile(
+    r"%(\{[^}]*\})?[#0\- +']*[*0-9.]*(?:hh|ll|[hlLqjzt])?([@diouxXeEfgGaAcsSpn%])"
+)
 
 
 def _extract_value(text: str, i: int) -> str:
@@ -32,25 +54,186 @@ def _extract_value(text: str, i: int) -> str:
     return text[start:i]
 
 
-def extract_clone_src(message: str) -> Optional[str]:
-    """
-    Naively extracts the source command from a 'cloneForCompatability' unified log message.
-    Most of the surrounding data in these messages is redundant; only ASCII strings
-    longer than 16 bytes are considered for extraction.
+def _extract_src_raw(message: str) -> Optional[str]:
+    """Return the balanced ``src=`` value from a cloneForCompatability message.
 
-    Only supports:
-      - src=utxt(...)  Extracts and decodes Apple event utxt-encoded bytes.
-      - src="..."     Extracts raw quoted ASCII shell commands.
+    The format is ``cloneForCompatability(src=<VALUE> dst=<ptr>)`` where VALUE may
+    be a quoted string, a ``type(len/$hex)`` blob, a ``[...]`` list, a ``{...}``
+    record, or a bare token. The value ends at the top-level `` dst=`` (the hex
+    dump is frequently truncated, so the closing ``)`` is often absent).
+    """
+    i = message.find("(src=")
+    if i == -1:
+        return None
+    i += len("(src=")
+    start = i
+    depth = 0
+    in_quote = ""
+    escaped = False
+    while i < len(message):
+        ch = message[i]
+        if in_quote:
+            # Track escapes rather than peeking back, so `\\"` closes the string
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == in_quote:
+                in_quote = ""
+        elif ch in "\"'":
+            in_quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                break  # closing ')' of cloneForCompatability(
+            depth -= 1
+        elif depth == 0 and message.startswith(" dst=", i):
+            break
+        i += 1
+    return message[start:i].strip() or None
+
+
+def _decode_strings(text: str) -> List[str]:
+    """Decode every readable string (utxt or quoted) found in a src blob, in order."""
+    out: List[str] = []
+    for m in re.finditer(r'utxt\((\d+/\$[0-9a-fA-F.]*)\)|"((?:[^"\\]|\\.)*)"', text):
+        if m.group(1) is not None:
+            try:
+                out.append(decode_utxt_raw(m.group(1)))
+            except Exception:
+                continue
+        else:
+            out.append(m.group(2))
+    return out
+
+
+def _describe_compiled_script(type_name: str, raw: str) -> Optional[str]:
+    """Typed placeholder for a compiled-OSA-script clone whose body the log truncated.
+
+    ``raw`` is ``<declared_len>/$<first ~32 bytes hex>...``. Returns None when the
+    blob is not a recognizable OSA script (so opaque ``----``/``tdta`` data is left
+    dropped rather than mislabelled).
+    """
+    length, _, hex_part = raw.partition("/$")
+    head = hex_part.strip(".").lower()[:16]
+    lang = next((name for sig, name in _OSA_MAGICS.items() if head.startswith(sig)), None)
+    if lang is None:
+        if type_name == "scpt":
+            lang = "OSA"  # scpt is by definition a compiled script
+        else:
+            return None  # ---- / tdta without OSA magic: not a script we can label
+    # '----' is the direct-object keyword, not a container type; only scpt/tdta name one.
+    container = f" · {type_name}" if type_name in ("scpt", "tdta") else ""
+    return (
+        f"<compiled {lang} script{container} · {length.strip()} bytes · "
+        "source redacted from unified log>"
+    )
+
+
+def _decompile_record(raw: str) -> Optional[str]:
+    """Decompile a structured Apple-Event/object-specifier clone record to AppleScript."""
+    try:
+        parsed = parse_apple_event_debug(raw)
+    except Exception:
+        return None
+    if parsed.get("event_class") is None:
+        return None
+    event_for_ast = {**parsed, "params": parsed.get("params") or {}}
+    try:
+        return derive_ast(event_for_ast)
+    except Exception:
+        return None
+
+
+def extract_clone_src(message: str) -> Optional[str]:
+    """Extract a human-readable source from a 'cloneForCompatability' log message.
+
+    Handles:
+      - ``src="..."``                  raw quoted ASCII shell commands.
+      - ``src=utxt(...)``              a single utxt-encoded Unicode string.
+      - ``src=[utxt(...)/"..."]``      a list of strings (joined).
+      - ``src=scpt/tdta/----(...)``    compiled OSA scripts -> typed placeholder
+                                       (body is truncated out of the log).
+      - ``src={...}``                  object-specifier/event records -> AppleScript.
+
+    Everything else (pointers, scalars, enums, type codes, opaque binary) is dropped.
     """
     if "cloneForCompatability" not in message:
         return None
-    if "src=utxt" in message:
-        _raw = message.split("src=utxt(", 1)[1].split(") dst=", 1)[0]
-        return decode_utxt_raw(_raw)
-    elif 'src="' in message:
-        _raw = message.split('src="', 1)[1].split('" dst=', 1)[0]
-        return _raw
+    raw = _extract_src_raw(message)
+    if not raw:
+        return None
+
+    if raw[0] == '"':
+        return raw[1:-1] if raw.endswith('"') and len(raw) > 1 else raw[1:]
+
+    single_utxt = re.fullmatch(r"utxt\((.*)\)", raw, re.S)
+    if single_utxt:
+        try:
+            return decode_utxt_raw(single_utxt.group(1))
+        except Exception:
+            return None
+
+    if raw[0] == "[":
+        return " ".join(s for s in _decode_strings(raw) if s) or None
+
+    compiled = re.fullmatch(r"(scpt|tdta|----)\((\d+/\$[0-9a-fA-F.]*)\)", raw, re.S)
+    if compiled:
+        return _describe_compiled_script(compiled.group(1), compiled.group(2))
+
+    if raw[0] == "{":
+        return _decompile_record(raw)
+
     return None
+
+
+PRIVACY_PUBLIC = "public"  # %{public}: visible on any Mac
+PRIVACY_DEFAULT = "default"  # unmarked %s/%@: private by default
+PRIVACY_PRIVATE = "private"  # %{private}/%{sensitive}
+_PRIVACY_RANK = {PRIVACY_PUBLIC: 0, PRIVACY_DEFAULT: 1, PRIVACY_PRIVATE: 2}
+
+# Literal text right before the specifier that carries an Apple Event or clone payload.
+_PAYLOAD_PREFIXES = ("event=", "reply=", "src=")
+
+
+def payload_privacy(format_string: str) -> Optional[str]:
+    """How unified logging redacts a record's payload, judged from its formatString.
+
+    Dynamic strings (``%s``, ``%@``) are private unless marked ``%{public}``, so:
+
+    - ``"public"``:  the payload is ``%{public}``, visible on any Mac.
+    - ``"default"``: the payload is an unmarked ``%s``/``%@``, visible only with
+      ``Enable-Private-Data`` or ``Default-Privacy-Setting: Public``.
+    - ``"private"``: the payload is ``%{private}``/``%{sensitive}``, visible only
+      with ``Enable-Private-Data``.
+
+    Scalars and pointers are always public and are ignored. When no specifier is
+    introduced by ``event=``/``reply=``/``src=``, every dynamic string counts.
+    Returns None when there is no formatString to judge from.
+    """
+    if not format_string:
+        return None
+    payload: List[str] = []
+    other: List[str] = []
+    prev_end = 0
+    for m in _SPEC_RE.finditer(format_string):
+        literal = format_string[prev_end : m.start()]
+        prev_end = m.end()
+        ann, conv = m.group(1) or "", m.group(2)
+        if conv not in ("s", "@", "S"):
+            continue
+        if "private" in ann or "sensitive" in ann:
+            cls = PRIVACY_PRIVATE
+        elif "public" in ann:
+            cls = PRIVACY_PUBLIC
+        else:
+            cls = PRIVACY_DEFAULT
+        (payload if literal.endswith(_PAYLOAD_PREFIXES) else other).append(cls)
+    classes = payload or other
+    # A record is only as visible as its most restricted payload: one redacted
+    # field makes the whole Apple Event unparseable.
+    return max(classes, key=_PRIVACY_RANK.__getitem__) if classes else PRIVACY_PUBLIC
 
 
 def extract_apple_events(message: str) -> Dict[str, str]:
@@ -90,6 +273,16 @@ def extract_apple_events(message: str) -> Dict[str, str]:
     return out
 
 
+def _bridge_call_record(payload: str, *, lookup_failed: bool = False) -> Optional[Dict[str, Any]]:
+    call = decode_bridge_payload(payload)
+    if call is None:
+        return None
+    record = {"raw": payload, **call, "applescript": render_call(call)}
+    if lookup_failed:
+        record["lookup_failed"] = True
+    return record
+
+
 def enrich_unified_log(unified_log: Dict[str, Any]) -> Dict[str, Any]:
     """Enrich a unified log entry with extracted Apple Events and decompiled AppleScript."""
 
@@ -97,11 +290,28 @@ def enrich_unified_log(unified_log: Dict[str, Any]) -> Dict[str, Any]:
     unified_log["appleEvent"] = {}
 
     if "cloneForCompatability" in raw_message:
+        if is_bridge_clone(raw_message):
+            # AppleScriptObjC bridge call: logged only as a clone, never as event={...}
+            payload = extract_clone_event(raw_message)
+            record = _bridge_call_record(payload) if payload else None
+            if record is None:
+                return None
+            unified_log["appleEvent"]["objc"] = record
+            return unified_log
         unified_log["appleEvent"]["clone"] = extract_clone_src(raw_message)
         return unified_log
 
     if "event=" not in raw_message and "reply=" not in raw_message:
         return None
+
+    if is_bridge_event(raw_message):
+        # A bridge call that fell back to a real event: seen when the receiving class
+        # does not exist (AppleScriptObjC then lets the event go unhandled, -1708)
+        payload = extract_apple_events(raw_message).get("event")
+        record = _bridge_call_record(payload, lookup_failed=True) if payload else None
+        if record is not None:
+            unified_log["appleEvent"]["objc"] = record
+            return unified_log
 
     # Extract Apple Events event and reply payloads from the raw message if present
     raw_apple_event = extract_apple_events(raw_message)
@@ -111,26 +321,36 @@ def enrich_unified_log(unified_log: Dict[str, Any]) -> Dict[str, Any]:
         if parsed.get("event_class") is None:
             return None
 
+        # The target is kept accurate on the enriched event, but "tell application X"
+        # is dropped from the rendered AppleScript when it would be redundant (the
+        # target is the process itself).
+        process_image_path = unified_log.get("processImagePath", "")
+        curr_process = os.path.basename(process_image_path)
+        omit_target = False
         if key == "event" and "reply" in raw_apple_event:
-            # if this is a reply, then the original target is the process image path
-            process_image_path = unified_log.get("processImagePath", "")
-            parsed["target"] = os.path.basename(process_image_path)
+            # Receiver side (event+reply logged together): the process handled an
+            # event addressed to itself, so the target is this process.
+            parsed["target"] = curr_process
+            omit_target = True
         elif key == "event" and "target" in parsed:
-            # If the target is the same as the process image path, remove the target
-            process_image_path = unified_log.get("processImagePath", "")
-            curr_process = os.path.basename(process_image_path)
             if curr_process == parsed["target"]:
-                parsed["target"] = None
+                omit_target = True
         elif "Self" in raw_message:
-            # When sending to self, it's redundant to include the target in the AppleScript
-            parsed["target"] = None
+            # Sent to self: the target is this process.
+            parsed["target"] = curr_process
+            omit_target = True
 
-        # derive_ast expects params to be a dict; handle None from parse
+        # derive_ast expects params to be a dict; handle None from parse. The real
+        # target is kept so the decompiler can resolve the app's terminology
+        # (SDEFS[target]); derive_ast then drops the redundant "tell application X".
         event_for_ast = {**parsed, "params": parsed.get("params") or {}}
-        applescript = derive_ast(event_for_ast)
+        applescript = derive_ast(event_for_ast, omit_target=omit_target)
         unified_log["appleEvent"][key] = {
             "raw": payload,
             "return_id": parsed.get("return_id"),
+            "event_class": parsed.get("event_class"),
+            "event_id": parsed.get("event_id"),
+            "target": parsed.get("target"),
             "applescript": applescript,
         }
 
